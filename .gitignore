@@ -1,0 +1,30 @@
+tmp/
+components/
+managed_components/
+build/
+dist/
+.vscode/
+.devcontainer/
+sdkconfig.old
+sdkconfig
+dependencies.lock
+.env
+releases/
+main/assets/lang_config.h
+main/mmap_generate_emoji.h
+.DS_Store
+.cache
+*.pyc
+*.bin
+mmap_generate_*.h
+.clangd
+
+# Local assistant/workspace metadata
+AGENTS.md
+docs/superpowers/
+
+# Local editor and diagnostic artifacts
+.idea/
+.fleet/
+*.log
+compile_commands.json
