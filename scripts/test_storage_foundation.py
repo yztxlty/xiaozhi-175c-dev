@@ -180,6 +180,7 @@ def test_flash_script_contract() -> None:
         assert required in script, f"migration safety step missing: {required}"
     assert script.index("read_flash 0x0 0x2000000") < script.index("write_flash")
     assert script.index("verify_backup_size") < script.index("write_flash")
+    assert "--before no_reset --after hard_reset run" in script
     new_slot = script.index('0x800000 "$app_image"')
     partition_table = script.index('0x8000 "$partition_image"')
     old_slot = script.index('0x200000 "$app_image"')

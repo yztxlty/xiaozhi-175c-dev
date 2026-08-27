@@ -43,6 +43,11 @@ esptool_cmd() {
         --before default_reset --after no_reset "$@"
 }
 
+reset_device() {
+    "$python_bin" -m esptool --chip esp32s3 --port "$port" \
+        --before no_reset --after hard_reset run
+}
+
 verify_backup_size() {
     local file="$1"
     local expected="$2"
@@ -103,7 +108,7 @@ cat "$backup_dir/sha256.txt"
 
 if [[ "${YGSOUL_FLASH_CONFIRM:-}" != "YES" ]]; then
     echo "Backup verified. Set YGSOUL_FLASH_CONFIRM=YES to authorize the write phase." >&2
-    esptool_cmd run || true
+    reset_device || true
     exit 2
 fi
 
@@ -141,4 +146,4 @@ esptool_cmd verify_flash \
 
 echo "Migration write and read-back verification completed successfully."
 echo "Recovery backup: $backup_dir"
-esptool_cmd run
+reset_device
