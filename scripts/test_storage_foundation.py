@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FLASH_SIZE = 32 * 1024 * 1024
 BOARD_DIR = ROOT / "main/boards/waveshare/esp32-s3-touch-amoled-1.75"
+SOURCE_ARRAY_DIR = BOARD_DIR / "assets/source_arrays"
 
 YGSOUL_ASSETS = {
     "ygsoul_boot": ("ygsoul_boot_lvgl.h", "ygsoul_boot_pixels", 0x12, 466, 466, 932),
@@ -124,20 +125,38 @@ def test_assets_contract() -> None:
         assert header == (0x19, color_format, 0, width, height, stride, 0), (
             f"CBin header mismatch: {name}: {header}"
         )
-        source_pixels = extract_c_array(BOARD_DIR / source_name, symbol)
+        source_pixels = extract_c_array(SOURCE_ARRAY_DIR / source_name, symbol)
         assert hashlib.sha256(data[12:]).digest() == hashlib.sha256(source_pixels).digest(), (
             f"CBin pixel payload changed: {name}"
         )
+
+
+def test_source_contract() -> None:
+    board_source = (BOARD_DIR / "esp32-s3-touch-amoled-1.75.cc").read_text(encoding="utf-8")
+    cmake_source = (ROOT / "main/CMakeLists.txt").read_text(encoding="utf-8")
+    for name in YGSOUL_ASSETS:
+        assert f'"{name}.cbin"' in board_source, f"board does not load {name}.cbin"
+    assert "LoadYGSoulAssets" in board_source
+    assert "LvglCBinImage" in board_source
+    assert "LvglSourceImage" not in board_source
+    assert "assets/cbin" in cmake_source
+    for source_name, *_ in YGSOUL_ASSETS.values():
+        assert not (BOARD_DIR / source_name).exists(), f"compiled image source remains: {source_name}"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--partition-only", action="store_true")
     parser.add_argument("--assets-only", action="store_true")
+    parser.add_argument("--source-only", action="store_true")
     args = parser.parse_args()
     if args.assets_only:
         test_assets_contract()
         print("YGSoul lossless CBin contract passed")
+        return
+    if args.source_only:
+        test_source_contract()
+        print("storage source contract passed")
         return
     test_partition_contract()
     print("storage partition contract passed")

@@ -1,9 +1,7 @@
 #include "wifi_board.h"
 #include "display/lcd_display.h"
 #include "esp_lcd_co5300.h"
-#include "ygsoul_companion_lvgl.h"
-#include "ygsoul_speaking_mouth_lvgl.h"
-#include "ygsoul_boot_lvgl.h"
+#include "assets.h"
 
 #include "codecs/box_audio_codec.h"
 #include "application.h"
@@ -26,6 +24,8 @@
 #include <esp_lvgl_port.h>
 #include <lvgl.h>
 
+#include <array>
+
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
 
 // YGSoul display-only styling. Keep these values local to this board so other
@@ -36,13 +36,7 @@ static constexpr uint8_t YGSOUL_MOUTH_CLOSED = 0;
 static constexpr int32_t YGSOUL_MOUTH_X = 119;
 static constexpr int32_t YGSOUL_MOUTH_Y = 116;
 static constexpr uint32_t YGSOUL_MOUTH_FRAME_DURATION_MS[] = {140, 120, 140};
-static const lv_image_dsc_t* const YGSOUL_MOUTH_FRAMES[] = {
-    &ygsoul_mouth_1,
-    &ygsoul_mouth_2,
-    &ygsoul_mouth_3,
-};
-static constexpr uint8_t YGSOUL_MOUTH_FRAME_COUNT =
-    sizeof(YGSOUL_MOUTH_FRAMES) / sizeof(YGSOUL_MOUTH_FRAMES[0]);
+static constexpr uint8_t YGSOUL_MOUTH_FRAME_COUNT = 3;
 static_assert(
     YGSOUL_MOUTH_FRAME_COUNT ==
     sizeof(YGSOUL_MOUTH_FRAME_DURATION_MS) / sizeof(YGSOUL_MOUTH_FRAME_DURATION_MS[0]));
@@ -105,15 +99,50 @@ private:
     bool showing_boot_logo_ = true;
     bool ygsoul_mouth_speaking_ = false;
     bool ygsoul_chat_message_is_system_ = true;
-    std::unique_ptr<LvglImage> ygsoul_companion_ =
-        std::make_unique<LvglSourceImage>(&ygsoul_companion_nomouth);
-    std::unique_ptr<LvglImage> ygsoul_boot_ =
-        std::make_unique<LvglSourceImage>(&ygsoul_boot_lvgl);
+    bool ygsoul_assets_ready_ = false;
+    std::unique_ptr<LvglImage> ygsoul_companion_;
+    std::unique_ptr<LvglImage> ygsoul_boot_;
+    std::array<std::unique_ptr<LvglImage>, YGSOUL_MOUTH_FRAME_COUNT> ygsoul_mouth_frames_;
     lv_obj_t* ygsoul_image_ = nullptr;
     lv_obj_t* ygsoul_mouth_image_ = nullptr;
     lv_obj_t* ygsoul_boot_image_ = nullptr;
     lv_timer_t* ygsoul_mouth_timer_ = nullptr;
     uint8_t ygsoul_mouth_frame_ = YGSOUL_MOUTH_CLOSED;
+
+    std::unique_ptr<LvglImage> LoadYGSoulAsset(const char* name) {
+        void* data = nullptr;
+        size_t size = 0;
+        if (!Assets::GetInstance().GetAssetData(name, data, size) || data == nullptr || size < 12) {
+            ESP_LOGE(TAG, "YGSoul asset is missing or invalid: %s", name);
+            return nullptr;
+        }
+        auto image = std::make_unique<LvglCBinImage>(data);
+        if (image->image_dsc() == nullptr) {
+            ESP_LOGE(TAG, "Failed to decode YGSoul CBin: %s", name);
+            return nullptr;
+        }
+        return image;
+    }
+
+    bool LoadYGSoulAssets() {
+        auto boot = LoadYGSoulAsset("ygsoul_boot.cbin");
+        auto companion = LoadYGSoulAsset("ygsoul_companion_nomouth.cbin");
+        std::array<std::unique_ptr<LvglImage>, YGSOUL_MOUTH_FRAME_COUNT> mouths;
+        mouths[0] = LoadYGSoulAsset("ygsoul_mouth_1.cbin");
+        mouths[1] = LoadYGSoulAsset("ygsoul_mouth_2.cbin");
+        mouths[2] = LoadYGSoulAsset("ygsoul_mouth_3.cbin");
+        if (boot == nullptr || companion == nullptr ||
+            mouths[0] == nullptr || mouths[1] == nullptr || mouths[2] == nullptr) {
+            ESP_LOGE(TAG, "YGSoul assets are incomplete; using the lightweight display fallback");
+            return false;
+        }
+        ygsoul_boot_ = std::move(boot);
+        ygsoul_companion_ = std::move(companion);
+        ygsoul_mouth_frames_ = std::move(mouths);
+        ygsoul_assets_ready_ = true;
+        ESP_LOGI(TAG, "Loaded all YGSoul CBin assets from the assets partition");
+        return true;
+    }
 
     void ApplyYGSoulChatMessageColor() {
         if (chat_message_label_ == nullptr) {
@@ -155,11 +184,13 @@ private:
     }
 
     void SetYGSoulMouthFrame(uint8_t frame) {
-        if (ygsoul_mouth_image_ == nullptr) {
+        if (!ygsoul_assets_ready_ || ygsoul_mouth_image_ == nullptr) {
             return;
         }
         ygsoul_mouth_frame_ = frame % YGSOUL_MOUTH_FRAME_COUNT;
-        lv_image_set_src(ygsoul_mouth_image_, YGSOUL_MOUTH_FRAMES[ygsoul_mouth_frame_]);
+        lv_image_set_src(
+            ygsoul_mouth_image_,
+            ygsoul_mouth_frames_[ygsoul_mouth_frame_]->image_dsc());
     }
 
     static void YGSoulMouthTimerCallback(lv_timer_t* timer) {
@@ -280,12 +311,20 @@ public:
         lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES*  0.1, 0);
         lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES*  0.1, 0);
         ApplyYGSoulTheme();
+        if (!LoadYGSoulAssets()) {
+            showing_boot_logo_ = false;
+            ApplyYGSoulOverlayStyle();
+            lv_display_add_event_cb(display_, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+            return;
+        }
         ygsoul_image_ = lv_image_create(lv_screen_active());
         lv_image_set_src(ygsoul_image_, ygsoul_companion_->image_dsc());
         lv_obj_center(ygsoul_image_);
         lv_obj_add_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
         ygsoul_mouth_image_ = lv_image_create(lv_screen_active());
-        lv_image_set_src(ygsoul_mouth_image_, YGSOUL_MOUTH_FRAMES[YGSOUL_MOUTH_CLOSED]);
+        lv_image_set_src(
+            ygsoul_mouth_image_,
+            ygsoul_mouth_frames_[YGSOUL_MOUTH_CLOSED]->image_dsc());
         lv_obj_align_to(
             ygsoul_mouth_image_, ygsoul_image_, LV_ALIGN_TOP_LEFT,
             YGSOUL_MOUTH_X, YGSOUL_MOUTH_Y);
@@ -299,6 +338,10 @@ public:
 
     virtual void SetEmotion(const char* emotion) override {
         if (emotion == nullptr || !IsSetupUICalled()) {
+            return;
+        }
+        if (!ygsoul_assets_ready_) {
+            LcdDisplay::SetEmotion(emotion);
             return;
         }
         DisplayLockGuard lock(this);

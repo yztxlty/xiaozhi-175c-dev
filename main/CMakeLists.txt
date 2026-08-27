@@ -327,6 +327,8 @@ elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75C)
     set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
     set(BUILTIN_ICON_FONT font_awesome_30_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+    set(DEFAULT_ASSETS_EXTRA_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-amoled-1.75/assets/cbin")
 elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_83)
     set(MANUFACTURER "waveshare")
     set(BOARD_TYPE "esp32-s3-touch-lcd-1.83")

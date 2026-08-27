@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BOARD_DIR = ROOT / "main/boards/waveshare/esp32-s3-touch-amoled-1.75"
 OUTPUT_DIR = BOARD_DIR / "assets/cbin"
+SOURCE_DIR = BOARD_DIR / "assets/source_arrays"
 
 ASSETS = {
     "ygsoul_boot": ("ygsoul_boot_lvgl.h", "ygsoul_boot_pixels", 0x12, 466, 466, 932),
@@ -42,7 +43,7 @@ def extract_pixels(path: Path, symbol: str) -> bytes:
 
 
 def build_cbin(source_name: str, symbol: str, color_format: int, width: int, height: int, stride: int) -> bytes:
-    pixels = extract_pixels(BOARD_DIR / source_name, symbol)
+    pixels = extract_pixels(SOURCE_DIR / source_name, symbol)
     bytes_per_pixel = 3 if color_format == 0x14 else 2
     expected_size = width * height * bytes_per_pixel
     if len(pixels) != expected_size:
