@@ -154,11 +154,37 @@ def test_source_contract() -> None:
     assert "ContentStorage::GetInstance().Initialize()" in main_source
 
 
+def test_flash_script_contract() -> None:
+    script_path = ROOT / "scripts/flash_32m_storage_migration.sh"
+    assert script_path.is_file(), f"missing migration script: {script_path}"
+    script = script_path.read_text(encoding="utf-8")
+    lowered = script.lower()
+    for forbidden in ("erase_flash", "write_efuse", "burn_efuse", "disable_download"):
+        assert forbidden not in lowered, f"unsafe command in migration script: {forbidden}"
+    for required in (
+        "read_flash 0x0 0x2000000",
+        "read_flash 0x9000 0x32000",
+        "read_flash 0x3b000 0xd2000",
+        "read_flash 0x10d000 0x2000",
+        "read_flash 0x10f000 0x1000",
+        "erase_region 0x1400000 0xc00000",
+        "verify_flash",
+        "0x200000",
+        "0x800000",
+        "0xe00000",
+        "shasum -a 256",
+    ):
+        assert required in script, f"migration safety step missing: {required}"
+    assert script.index("read_flash 0x0 0x2000000") < script.index("write_flash")
+    assert script.index("verify_backup_size") < script.index("write_flash")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--partition-only", action="store_true")
     parser.add_argument("--assets-only", action="store_true")
     parser.add_argument("--source-only", action="store_true")
+    parser.add_argument("--flash-script-only", action="store_true")
     args = parser.parse_args()
     if args.assets_only:
         test_assets_contract()
@@ -167,6 +193,10 @@ def main() -> None:
     if args.source_only:
         test_source_contract()
         print("storage source contract passed")
+        return
+    if args.flash_script_only:
+        test_flash_script_contract()
+        print("safe flash migration contract passed")
         return
     test_partition_contract()
     print("storage partition contract passed")
