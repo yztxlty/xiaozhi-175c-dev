@@ -139,8 +139,17 @@ private:
         const uint16_t height = ReadLe16(bytes + 8);
         const uint16_t stride = ReadLe16(bytes + 10);
         const uint32_t payload_size = ReadLe32(bytes + 12);
+        const bool supported_format =
+            color_format == LV_COLOR_FORMAT_RGB565 ||
+            color_format == LV_COLOR_FORMAT_RGB565A8;
+        const uint32_t bytes_per_pixel =
+            color_format == LV_COLOR_FORMAT_RGB565A8 ? 3U : 2U;
+        const uint32_t expected_payload_size =
+            static_cast<uint32_t>(width) * height * bytes_per_pixel;
         if (memcmp(bytes, "YGI1", 4) != 0 || bytes[5] != 0 ||
-            width == 0 || height == 0 || stride == 0 ||
+            !supported_format || width == 0 || height == 0 ||
+            stride != static_cast<uint32_t>(width) * 2U ||
+            payload_size != expected_payload_size ||
             payload_size != size - kHeaderSize) {
             ESP_LOGE(TAG, "YGSoul asset header is invalid: %s", name);
             return nullptr;

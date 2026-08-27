@@ -140,6 +140,8 @@ def test_source_contract() -> None:
     assert "LoadYGSoulAssets" in board_source
     assert "LvglAllocatedImage" in board_source
     assert "heap_caps_malloc" in board_source
+    assert "LV_COLOR_FORMAT_RGB565A8" in board_source
+    assert "payload_size != expected_payload_size" in board_source
     assert "LvglSourceImage" not in board_source
     assert "assets/cbin" in cmake_source
     for source_name, *_ in YGSOUL_ASSETS.values():
