@@ -143,6 +143,16 @@ def test_source_contract() -> None:
     for source_name, *_ in YGSOUL_ASSETS.values():
         assert not (BOARD_DIR / source_name).exists(), f"compiled image source remains: {source_name}"
 
+    storage_header = (ROOT / "main/storage/content_storage.h").read_text(encoding="utf-8")
+    storage_source = (ROOT / "main/storage/content_storage.cc").read_text(encoding="utf-8")
+    main_source = (ROOT / "main/main.cc").read_text(encoding="utf-8")
+    assert "kMusicQuotaBytes = 8 * 1024 * 1024" in storage_header
+    assert "kGameQuotaBytes = 2 * 1024 * 1024" in storage_header
+    assert "kSafetyReserveBytes = 1536 * 1024" in storage_header
+    assert "mount_config.format_if_mount_failed = blank" in storage_source
+    assert "Health::Corrupt" in storage_source
+    assert "ContentStorage::GetInstance().Initialize()" in main_source
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()

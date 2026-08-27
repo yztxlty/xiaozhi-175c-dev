@@ -8,6 +8,7 @@
 #include <freertos/task.h>
 
 #include "application.h"
+#include "storage/content_storage.h"
 
 #define TAG "main"
 
@@ -21,6 +22,12 @@ extern "C" void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // Content storage is optional for the core conversation path. A damaged
+    // writable partition must not prevent the device from booting or updating.
+    if (!ContentStorage::GetInstance().Initialize()) {
+        ESP_LOGW(TAG, "Content storage is not ready; continuing with core features");
+    }
 
     // Initialize and run the application
     auto& app = Application::GetInstance();
