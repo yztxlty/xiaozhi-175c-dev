@@ -14,6 +14,7 @@
 #include "i2c_device.h"
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_master.h>
@@ -25,6 +26,7 @@
 #include <lvgl.h>
 
 #include <array>
+#include <cstring>
 
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
 
@@ -109,19 +111,50 @@ private:
     lv_timer_t* ygsoul_mouth_timer_ = nullptr;
     uint8_t ygsoul_mouth_frame_ = YGSOUL_MOUTH_CLOSED;
 
+    static uint16_t ReadLe16(const uint8_t* value) {
+        return static_cast<uint16_t>(value[0]) |
+               (static_cast<uint16_t>(value[1]) << 8);
+    }
+
+    static uint32_t ReadLe32(const uint8_t* value) {
+        return static_cast<uint32_t>(value[0]) |
+               (static_cast<uint32_t>(value[1]) << 8) |
+               (static_cast<uint32_t>(value[2]) << 16) |
+               (static_cast<uint32_t>(value[3]) << 24);
+    }
+
     std::unique_ptr<LvglImage> LoadYGSoulAsset(const char* name) {
         void* data = nullptr;
         size_t size = 0;
-        if (!Assets::GetInstance().GetAssetData(name, data, size) || data == nullptr || size < 12) {
+        constexpr size_t kHeaderSize = 16;
+        if (!Assets::GetInstance().GetAssetData(name, data, size) ||
+            data == nullptr || size < kHeaderSize) {
             ESP_LOGE(TAG, "YGSoul asset is missing or invalid: %s", name);
             return nullptr;
         }
-        auto image = std::make_unique<LvglCBinImage>(data);
-        if (image->image_dsc() == nullptr) {
-            ESP_LOGE(TAG, "Failed to decode YGSoul CBin: %s", name);
+
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        const uint8_t color_format = bytes[4];
+        const uint16_t width = ReadLe16(bytes + 6);
+        const uint16_t height = ReadLe16(bytes + 8);
+        const uint16_t stride = ReadLe16(bytes + 10);
+        const uint32_t payload_size = ReadLe32(bytes + 12);
+        if (memcmp(bytes, "YGI1", 4) != 0 || bytes[5] != 0 ||
+            width == 0 || height == 0 || stride == 0 ||
+            payload_size != size - kHeaderSize) {
+            ESP_LOGE(TAG, "YGSoul asset header is invalid: %s", name);
             return nullptr;
         }
-        return image;
+
+        void* pixels = heap_caps_malloc(
+            payload_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (pixels == nullptr) {
+            ESP_LOGE(TAG, "Not enough PSRAM for YGSoul asset: %s", name);
+            return nullptr;
+        }
+        memcpy(pixels, bytes + kHeaderSize, payload_size);
+        return std::make_unique<LvglAllocatedImage>(
+            pixels, payload_size, width, height, stride, color_format);
     }
 
     bool LoadYGSoulAssets() {

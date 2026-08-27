@@ -48,7 +48,11 @@ def build_cbin(source_name: str, symbol: str, color_format: int, width: int, hei
     expected_size = width * height * bytes_per_pixel
     if len(pixels) != expected_size:
         raise ValueError(f"unexpected pixel size for {symbol}: {len(pixels)} != {expected_size}")
-    header = struct.pack("<BBHHHHH", 0x19, color_format, 0, width, height, stride, 0)
+    # Portable, pointer-free YGSoul image container.  The runtime validates all
+    # fields and copies only the pixel payload to PSRAM before LVGL sees it.
+    header = struct.pack(
+        "<4sBBHHHI", b"YGI1", color_format, 0, width, height, stride, len(pixels)
+    )
     return header + pixels
 
 

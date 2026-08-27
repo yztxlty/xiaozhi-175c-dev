@@ -1,6 +1,5 @@
 #include "content_storage.h"
 
-#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -9,7 +8,6 @@
 
 #include <esp_err.h>
 #include <esp_log.h>
-#include <esp_partition.h>
 #include <esp_vfs_fat.h>
 
 #define TAG "ContentStorage"
@@ -80,35 +78,19 @@ bool ContentStorage::Initialize() {
         return true;
     }
 
-    const esp_partition_t* partition = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, kPartitionLabel);
-    if (partition == nullptr) {
-        health_ = Health::Unavailable;
-        ESP_LOGW(TAG, "Content partition is unavailable");
-        return false;
-    }
-
-    std::array<uint8_t, 4096> first_sector {};
-    esp_err_t result = esp_partition_read(partition, 0, first_sector.data(), first_sector.size());
-    if (result != ESP_OK) {
-        health_ = Health::Unavailable;
-        ESP_LOGE(TAG, "Failed to inspect content partition: %s", esp_err_to_name(result));
-        return false;
-    }
-    const bool blank = std::all_of(
-        first_sector.begin(), first_sector.end(), [](uint8_t value) { return value == 0xFF; });
-
     esp_vfs_fat_mount_config_t mount_config {};
-    mount_config.format_if_mount_failed = blank;
+    // The migration flashes a pre-formatted wear-levelled FAT image. Never
+    // format at runtime: a failed mount must preserve every recoverable byte.
+    mount_config.format_if_mount_failed = false;
     mount_config.max_files = 12;
     mount_config.allocation_unit_size = 4096;
     mount_config.disk_status_check_enable = false;
     mount_config.use_one_fat = false;
-    result = esp_vfs_fat_spiflash_mount_rw_wl(
+    esp_err_t result = esp_vfs_fat_spiflash_mount_rw_wl(
         kMountPoint, kPartitionLabel, &mount_config, &wl_handle_);
     if (result != ESP_OK) {
         wl_handle_ = -1;
-        health_ = blank ? Health::Unformatted : Health::Corrupt;
+        health_ = result == ESP_ERR_NOT_FOUND ? Health::Unavailable : Health::Corrupt;
         ESP_LOGE(TAG, "Failed to mount content partition without data loss: %s", esp_err_to_name(result));
         return false;
     }

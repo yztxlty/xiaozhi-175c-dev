@@ -11,3 +11,9 @@ idf_build_set_property(MINIMAL_BUILD ON)
 
 set(PROJECT_VER "2.2.4")
 project(xiaozhi)
+
+if(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75C)
+    set(CONTENT_SEED_DIR "${CMAKE_BINARY_DIR}/content-seed")
+    file(MAKE_DIRECTORY "${CONTENT_SEED_DIR}")
+    fatfs_create_spiflash_image(content "${CONTENT_SEED_DIR}")
+endif()

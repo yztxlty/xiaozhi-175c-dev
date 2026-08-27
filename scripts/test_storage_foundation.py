@@ -120,13 +120,14 @@ def test_assets_contract() -> None:
         cbin_path = asset_dir / f"{name}.cbin"
         assert cbin_path.is_file(), f"missing CBin: {cbin_path}"
         data = cbin_path.read_bytes()
-        assert len(data) >= 12, f"CBin header truncated: {cbin_path}"
-        header = struct.unpack("<BBHHHHH", data[:12])
-        assert header == (0x19, color_format, 0, width, height, stride, 0), (
+        assert len(data) >= 16, f"CBin header truncated: {cbin_path}"
+        header = struct.unpack("<4sBBHHHI", data[:16])
+        source_pixels = extract_c_array(SOURCE_ARRAY_DIR / source_name, symbol)
+        assert header == (b"YGI1", color_format, 0, width, height, stride, len(source_pixels)), (
             f"CBin header mismatch: {name}: {header}"
         )
-        source_pixels = extract_c_array(SOURCE_ARRAY_DIR / source_name, symbol)
-        assert hashlib.sha256(data[12:]).digest() == hashlib.sha256(source_pixels).digest(), (
+        assert len(data) == 16 + len(source_pixels), f"CBin size mismatch: {name}"
+        assert hashlib.sha256(data[16:]).digest() == hashlib.sha256(source_pixels).digest(), (
             f"CBin pixel payload changed: {name}"
         )
 
@@ -137,7 +138,8 @@ def test_source_contract() -> None:
     for name in YGSOUL_ASSETS:
         assert f'"{name}.cbin"' in board_source, f"board does not load {name}.cbin"
     assert "LoadYGSoulAssets" in board_source
-    assert "LvglCBinImage" in board_source
+    assert "LvglAllocatedImage" in board_source
+    assert "heap_caps_malloc" in board_source
     assert "LvglSourceImage" not in board_source
     assert "assets/cbin" in cmake_source
     for source_name, *_ in YGSOUL_ASSETS.values():
@@ -149,7 +151,8 @@ def test_source_contract() -> None:
     assert "kMusicQuotaBytes = 8 * 1024 * 1024" in storage_header
     assert "kGameQuotaBytes = 2 * 1024 * 1024" in storage_header
     assert "kSafetyReserveBytes = 1536 * 1024" in storage_header
-    assert "mount_config.format_if_mount_failed = blank" in storage_source
+    assert "mount_config.format_if_mount_failed = false" in storage_source
+    assert "esp_partition_read" not in storage_source
     assert "Health::Corrupt" in storage_source
     assert "ContentStorage::GetInstance().Initialize()" in main_source
 
@@ -167,7 +170,7 @@ def test_flash_script_contract() -> None:
         "read_flash 0x3b000 0xd2000",
         "read_flash 0x10d000 0x2000",
         "read_flash 0x10f000 0x1000",
-        "erase_region 0x1400000 0xc00000",
+        '0x1400000 "$content_image"',
         "verify_flash",
         "0x200000",
         "0x800000",
@@ -177,6 +180,17 @@ def test_flash_script_contract() -> None:
         assert required in script, f"migration safety step missing: {required}"
     assert script.index("read_flash 0x0 0x2000000") < script.index("write_flash")
     assert script.index("verify_backup_size") < script.index("write_flash")
+    new_slot = script.index('0x800000 "$app_image"')
+    partition_table = script.index('0x8000 "$partition_image"')
+    old_slot = script.index('0x200000 "$app_image"')
+    assert new_slot < partition_table < old_slot, "migration does not preserve a bootable slot"
+
+
+def test_content_image_contract() -> None:
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    assert "fatfs_create_spiflash_image(content" in cmake
+    storage_source = (ROOT / "main/storage/content_storage.cc").read_text(encoding="utf-8")
+    assert "format_if_mount_failed = false" in storage_source
 
 
 def main() -> None:
@@ -199,6 +213,10 @@ def main() -> None:
         print("safe flash migration contract passed")
         return
     test_partition_contract()
+    test_assets_contract()
+    test_source_contract()
+    test_flash_script_contract()
+    test_content_image_contract()
     print("storage partition contract passed")
 
 

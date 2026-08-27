@@ -322,6 +322,8 @@ elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75)
     set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
     set(BUILTIN_ICON_FONT font_awesome_30_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+    set(DEFAULT_ASSETS_EXTRA_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-amoled-1.75/assets/cbin")
 elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75C)
     set(MANUFACTURER "waveshare")
     set(BOARD_TYPE "esp32-s3-touch-amoled-1.75")
@@ -1018,6 +1020,8 @@ function(build_default_assets_bin)
     # Add default assets extra files if defined
     if(DEFAULT_ASSETS_EXTRA_FILES)
         list(APPEND BUILD_ARGS "--extra_files" "${DEFAULT_ASSETS_EXTRA_FILES}")
+        file(GLOB_RECURSE DEFAULT_ASSETS_EXTRA_DEPENDS CONFIGURE_DEPENDS
+            "${DEFAULT_ASSETS_EXTRA_FILES}/*")
     endif()
     
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")
@@ -1030,6 +1034,7 @@ function(build_default_assets_bin)
         DEPENDS
             ${SDKCONFIG}
             ${PROJECT_DIR}/scripts/build_default_assets.py
+            ${DEFAULT_ASSETS_EXTRA_DEPENDS}
         COMMENT "Building default assets.bin based on configuration"
         VERBATIM
     )
