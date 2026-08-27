@@ -41,6 +41,11 @@ static const lv_image_dsc_t* const YGSOUL_MOUTH_FRAMES[] = {
     &ygsoul_mouth_2,
     &ygsoul_mouth_3,
 };
+static constexpr uint8_t YGSOUL_MOUTH_FRAME_COUNT =
+    sizeof(YGSOUL_MOUTH_FRAMES) / sizeof(YGSOUL_MOUTH_FRAMES[0]);
+static_assert(
+    YGSOUL_MOUTH_FRAME_COUNT ==
+    sizeof(YGSOUL_MOUTH_FRAME_DURATION_MS) / sizeof(YGSOUL_MOUTH_FRAME_DURATION_MS[0]));
 
 class Pmic : public Axp2101 {
 public:
@@ -153,7 +158,7 @@ private:
         if (ygsoul_mouth_image_ == nullptr) {
             return;
         }
-        ygsoul_mouth_frame_ = frame % 3;
+        ygsoul_mouth_frame_ = frame % YGSOUL_MOUTH_FRAME_COUNT;
         lv_image_set_src(ygsoul_mouth_image_, YGSOUL_MOUTH_FRAMES[ygsoul_mouth_frame_]);
     }
 
@@ -162,7 +167,8 @@ private:
         if (self == nullptr || !self->ygsoul_mouth_speaking_) {
             return;
         }
-        const uint8_t next_frame = (self->ygsoul_mouth_frame_ + 1) % 3;
+        const uint8_t next_frame =
+            (self->ygsoul_mouth_frame_ + 1) % YGSOUL_MOUTH_FRAME_COUNT;
         self->SetYGSoulMouthFrame(next_frame);
         lv_timer_set_period(timer, YGSOUL_MOUTH_FRAME_DURATION_MS[next_frame]);
     }
@@ -171,20 +177,23 @@ private:
         if (ygsoul_mouth_image_ == nullptr || ygsoul_mouth_speaking_) {
             return;
         }
-        ygsoul_mouth_speaking_ = true;
         SetYGSoulMouthFrame(YGSOUL_MOUTH_CLOSED);
         if (ygsoul_mouth_timer_ == nullptr) {
             ygsoul_mouth_timer_ = lv_timer_create(
                 YGSoulMouthTimerCallback,
                 YGSOUL_MOUTH_FRAME_DURATION_MS[YGSOUL_MOUTH_CLOSED],
                 this);
-        } else {
-            lv_timer_set_period(
-                ygsoul_mouth_timer_,
-                YGSOUL_MOUTH_FRAME_DURATION_MS[YGSOUL_MOUTH_CLOSED]);
-            lv_timer_reset(ygsoul_mouth_timer_);
-            lv_timer_resume(ygsoul_mouth_timer_);
+            if (ygsoul_mouth_timer_ == nullptr) {
+                ESP_LOGE(TAG, "Failed to create YGSoul mouth timer");
+                return;
+            }
         }
+        ygsoul_mouth_speaking_ = true;
+        lv_timer_set_period(
+            ygsoul_mouth_timer_,
+            YGSOUL_MOUTH_FRAME_DURATION_MS[YGSOUL_MOUTH_CLOSED]);
+        lv_timer_reset(ygsoul_mouth_timer_);
+        lv_timer_resume(ygsoul_mouth_timer_);
     }
 
     void StopYGSoulSpeakingAnimation() {

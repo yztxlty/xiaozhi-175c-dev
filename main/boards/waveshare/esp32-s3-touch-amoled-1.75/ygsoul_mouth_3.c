@@ -77,4 +77,3 @@ const lv_image_dsc_t ygsoul_mouth_3 = {
   .data_size = sizeof(ygsoul_mouth_3_map),
   .data = ygsoul_mouth_3_map,
 };
-

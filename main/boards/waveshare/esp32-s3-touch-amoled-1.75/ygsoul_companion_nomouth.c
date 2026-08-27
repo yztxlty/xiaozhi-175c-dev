@@ -453,4 +453,3 @@ const lv_image_dsc_t ygsoul_companion_nomouth = {
   .data_size = sizeof(ygsoul_companion_nomouth_map),
   .data = ygsoul_companion_nomouth_map,
 };
-
