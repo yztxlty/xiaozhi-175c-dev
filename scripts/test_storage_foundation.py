@@ -79,9 +79,9 @@ def load_partitions() -> dict[str, Partition]:
 def test_partition_contract() -> None:
     partitions = load_partitions()
     expected = {
-        "ota_0": ("app", "ota_0", 0x200000, 0x600000),
-        "ota_1": ("app", "ota_1", 0x800000, 0x600000),
-        "assets": ("data", "spiffs", 0xE00000, 0x600000),
+        "assets": ("data", "spiffs", 0x200000, 0x600000),
+        "ota_0": ("app", "ota_0", 0x800000, 0x600000),
+        "ota_1": ("app", "ota_1", 0xE00000, 0x600000),
         "content": ("data", "fat", 0x1400000, 0xC00000),
     }
     for name, values in expected.items():
@@ -183,10 +183,13 @@ def test_flash_script_contract() -> None:
     assert script.index("read_flash 0x0 0x2000000") < script.index("write_flash")
     assert script.index("verify_backup_size") < script.index("write_flash")
     assert "--before no_reset --after hard_reset run" in script
-    new_slot = script.index('0x800000 "$app_image"')
+    first_slot = script.index('0x800000 "$app_image"')
+    second_slot = script.index('0xe00000 "$app_image"')
     partition_table = script.index('0x8000 "$partition_image"')
-    old_slot = script.index('0x200000 "$app_image"')
-    assert new_slot < partition_table < old_slot, "migration does not preserve a bootable slot"
+    assets = script.index('0x200000 "$assets_image"')
+    assert first_slot < second_slot < partition_table < assets, (
+        "migration does not preserve bootable slots before replacing the old app"
+    )
 
 
 def test_content_image_contract() -> None:

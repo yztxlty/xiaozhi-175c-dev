@@ -118,19 +118,19 @@ dd if="$backup_dir/full-flash-32mb.bin" of="$backup_dir/old-ota0-slot.bin" \
     bs=1048576 skip=2 count=4 status=none
 "$python_bin" -m esptool image_info "$backup_dir/old-ota0-slot.bin" >/dev/null
 
-# First stage the new app at the future ota_1 address. Only then switch the
-# partition table: after the switch, old ota_0 and new ota_1 are both bootable.
+# Stage both future OTA slots before switching the partition table. The old
+# ota_0 remains bootable until the new table exposes the two verified images.
 esptool_cmd write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB \
     0x800000 "$app_image"
 esptool_cmd verify_flash 0x800000 "$app_image"
 esptool_cmd write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB \
+    0xe00000 "$app_image"
+esptool_cmd verify_flash 0xe00000 "$app_image"
+esptool_cmd write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB \
     0x8000 "$partition_image"
 esptool_cmd verify_flash 0x8000 "$partition_image"
 esptool_cmd write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB \
-    0x200000 "$app_image"
-esptool_cmd verify_flash 0x200000 "$app_image"
-esptool_cmd write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB \
-    0xe00000 "$assets_image"
+    0x200000 "$assets_image"
 esptool_cmd write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB \
     0x1400000 "$content_image"
 esptool_cmd write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB \
@@ -139,9 +139,9 @@ esptool_cmd write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB \
 esptool_cmd verify_flash \
     0x8000 "$partition_image" \
     0x10d000 "$ota_data_image" \
-    0x200000 "$app_image" \
     0x800000 "$app_image" \
-    0xe00000 "$assets_image" \
+    0xe00000 "$app_image" \
+    0x200000 "$assets_image" \
     0x1400000 "$content_image"
 
 echo "Migration write and read-back verification completed successfully."

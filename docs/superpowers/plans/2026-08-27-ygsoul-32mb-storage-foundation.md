@@ -31,7 +31,7 @@
 
 - [ ] **Step 1: 编写失败测试**
 
-测试解析 CSV 并断言：`ota_0=(0x200000,0x600000)`、`ota_1=(0x800000,0x600000)`、`assets=(0xE00000,0x600000)`、`content=(0x1400000,0xC00000,data/fat)`，最后结束于 `0x2000000`，分区不重叠。
+测试解析 CSV 并断言：`assets=(0x200000,0x600000)`、`ota_0=(0x800000,0x600000)`、`ota_1=(0xE00000,0x600000)`、`content=(0x1400000,0xC00000,data/fat)`，最后结束于 `0x2000000`，分区不重叠，并确保 Assets 完整位于前 8MiB。
 
 - [ ] **Step 2: 运行测试确认因旧布局失败**
 
@@ -42,9 +42,9 @@ Expected: FAIL，指出 `ota_0` 仍为 4MB 或缺少 `content`。
 - [ ] **Step 3: 写入最小分区实现**
 
 ```csv
-ota_0,      app,    ota_0,      0x200000,     6M,
-ota_1,      app,    ota_1,      0x800000,     6M,
-assets,     data,   spiffs,     0xE00000,     6M,
+assets,     data,   spiffs,     0x200000,     6M,
+ota_0,      app,    ota_0,      0x800000,     6M,
+ota_1,      app,    ota_1,      0xE00000,     6M,
 content,    data,   fat,        0x1400000,    12M,
 ```
 
@@ -249,7 +249,7 @@ Expected: FAIL，指出迁移脚本不存在。
 
 - [ ] **Step 3: 实现备份优先的迁移脚本**
 
-脚本顺序固定为：读取芯片信息 → 完整读取 32MB → 单独读取四个关键分区 → 校验尺寸和 SHA-256 → 擦除 Content 范围 → 定址写入 partition table、ota_0、ota_1、Assets → 清理 otadata 到 ota_0 初始状态 → 复位。任何一步失败立即停止。
+脚本顺序固定为：读取芯片信息 → 完整读取 32MB → 单独读取四个关键分区 → 校验尺寸和 SHA-256 → 写入并校验未来 ota_0 → 写入并校验未来 ota_1 → 写入并校验 partition table → 写入并校验 Assets → 写入并校验 Content → 清理 otadata 到 ota_0 初始状态 → 全量定址复核 → 复位。任何一步失败立即停止。
 
 - [ ] **Step 4: 静态安全验收和提交**
 

@@ -33,9 +33,9 @@ if [[ ! -f "$partition_tool" ]]; then
     exit 1
 fi
 partition_dump="$(python3 "$partition_tool" "$partition_image")"
-grep -q '^ota_0,app,ota_0,0x200000,6M,' <<<"$partition_dump"
-grep -q '^ota_1,app,ota_1,0x800000,6M,' <<<"$partition_dump"
-grep -q '^assets,data,spiffs,0xe00000,6M,' <<<"$partition_dump"
+grep -q '^assets,data,spiffs,0x200000,6M,' <<<"$partition_dump"
+grep -q '^ota_0,app,ota_0,0x800000,6M,' <<<"$partition_dump"
+grep -q '^ota_1,app,ota_1,0xe00000,6M,' <<<"$partition_dump"
 grep -q '^content,data,fat,0x1400000,12M,' <<<"$partition_dump"
 
 echo "application: $app_bytes bytes, free: $((max_image_bytes - app_bytes)) bytes"
