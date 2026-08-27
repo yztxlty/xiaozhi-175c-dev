@@ -2,6 +2,7 @@
 #include "display/lcd_display.h"
 #include "esp_lcd_co5300.h"
 #include "ygsoul_companion_lvgl.h"
+#include "ygsoul_speaking_mouth_lvgl.h"
 #include "ygsoul_boot_lvgl.h"
 
 #include "codecs/box_audio_codec.h"
@@ -31,7 +32,15 @@
 // boards and the conversation state machine keep their existing behavior.
 static constexpr uint32_t YGSOUL_UI_BACKGROUND = 0xF4EFF9;
 static constexpr uint32_t YGSOUL_UI_TEXT = 0x4B355E;
-static constexpr uint32_t YGSOUL_UI_MOTION = 2800;
+static constexpr uint8_t YGSOUL_MOUTH_CLOSED = 0;
+static constexpr int32_t YGSOUL_MOUTH_X = 119;
+static constexpr int32_t YGSOUL_MOUTH_Y = 116;
+static constexpr uint32_t YGSOUL_MOUTH_FRAME_DURATION_MS[] = {140, 120, 140};
+static const lv_image_dsc_t* const YGSOUL_MOUTH_FRAMES[] = {
+    &ygsoul_mouth_1,
+    &ygsoul_mouth_2,
+    &ygsoul_mouth_3,
+};
 
 class Pmic : public Axp2101 {
 public:
@@ -89,15 +98,17 @@ static const co5300_lcd_init_cmd_t vendor_specific_init[] = {
 class CustomLcdDisplay : public SpiLcdDisplay {
 private:
     bool showing_boot_logo_ = true;
-    bool motion_speaking_ = false;
-    bool motion_initialized_ = false;
+    bool ygsoul_mouth_speaking_ = false;
     bool ygsoul_chat_message_is_system_ = true;
     std::unique_ptr<LvglImage> ygsoul_companion_ =
-        std::make_unique<LvglSourceImage>(&ygsoul_companion_lvgl);
+        std::make_unique<LvglSourceImage>(&ygsoul_companion_nomouth);
     std::unique_ptr<LvglImage> ygsoul_boot_ =
         std::make_unique<LvglSourceImage>(&ygsoul_boot_lvgl);
     lv_obj_t* ygsoul_image_ = nullptr;
+    lv_obj_t* ygsoul_mouth_image_ = nullptr;
     lv_obj_t* ygsoul_boot_image_ = nullptr;
+    lv_timer_t* ygsoul_mouth_timer_ = nullptr;
+    uint8_t ygsoul_mouth_frame_ = YGSOUL_MOUTH_CLOSED;
 
     void ApplyYGSoulChatMessageColor() {
         if (chat_message_label_ == nullptr) {
@@ -138,56 +149,50 @@ private:
         ApplyYGSoulOverlayStyle();
     }
 
-    static void SetCharacterTranslateY(void* object, int32_t value) {
-        lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(object), value, 0);
-    }
-
-    void StopYGSoulMotion() {
-        if (ygsoul_image_ == nullptr) {
+    void SetYGSoulMouthFrame(uint8_t frame) {
+        if (ygsoul_mouth_image_ == nullptr) {
             return;
         }
-        lv_anim_del(ygsoul_image_, SetCharacterTranslateY);
-        lv_obj_set_style_translate_y(ygsoul_image_, 0, 0);
-        lv_image_set_scale(ygsoul_image_, 220);
+        ygsoul_mouth_frame_ = frame % 3;
+        lv_image_set_src(ygsoul_mouth_image_, YGSOUL_MOUTH_FRAMES[ygsoul_mouth_frame_]);
     }
 
-    void StartYGSoulMotion(bool speaking) {
-        if (ygsoul_image_ == nullptr ||
-            (motion_initialized_ && motion_speaking_ == speaking)) {
+    static void YGSoulMouthTimerCallback(lv_timer_t* timer) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
+        if (self == nullptr || !self->ygsoul_mouth_speaking_) {
             return;
         }
+        const uint8_t next_frame = (self->ygsoul_mouth_frame_ + 1) % 3;
+        self->SetYGSoulMouthFrame(next_frame);
+        lv_timer_set_period(timer, YGSOUL_MOUTH_FRAME_DURATION_MS[next_frame]);
+    }
 
-        StopYGSoulMotion();
-        motion_speaking_ = speaking;
-        motion_initialized_ = true;
-        const uint32_t duration = speaking ? 700 : YGSOUL_UI_MOTION;
-
-        lv_anim_t float_animation;
-        lv_anim_init(&float_animation);
-        lv_anim_set_var(&float_animation, ygsoul_image_);
-        lv_anim_set_values(&float_animation, -3, 3);
-        lv_anim_set_duration(&float_animation, duration);
-        lv_anim_set_playback_duration(&float_animation, duration);
-        lv_anim_set_repeat_count(&float_animation, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_path_cb(&float_animation, lv_anim_path_ease_in_out);
-        lv_anim_set_exec_cb(&float_animation, SetCharacterTranslateY);
-        lv_anim_start(&float_animation);
-
-        if (speaking) {
-            lv_anim_t scale_animation;
-            lv_anim_init(&scale_animation);
-            lv_anim_set_var(&scale_animation, ygsoul_image_);
-            lv_anim_set_values(&scale_animation, 220, 226);
-            lv_anim_set_duration(&scale_animation, 700);
-            lv_anim_set_playback_duration(&scale_animation, 700);
-            lv_anim_set_repeat_count(&scale_animation, LV_ANIM_REPEAT_INFINITE);
-            lv_anim_set_path_cb(&scale_animation, lv_anim_path_ease_in_out);
-            lv_anim_set_exec_cb(&scale_animation, [](void* object, int32_t value) {
-                lv_image_set_scale(static_cast<lv_obj_t*>(object), value);
-            });
-            lv_anim_start(&scale_animation);
+    void StartYGSoulSpeakingAnimation() {
+        if (ygsoul_mouth_image_ == nullptr || ygsoul_mouth_speaking_) {
+            return;
         }
+        ygsoul_mouth_speaking_ = true;
+        SetYGSoulMouthFrame(YGSOUL_MOUTH_CLOSED);
+        if (ygsoul_mouth_timer_ == nullptr) {
+            ygsoul_mouth_timer_ = lv_timer_create(
+                YGSoulMouthTimerCallback,
+                YGSOUL_MOUTH_FRAME_DURATION_MS[YGSOUL_MOUTH_CLOSED],
+                this);
+        } else {
+            lv_timer_set_period(
+                ygsoul_mouth_timer_,
+                YGSOUL_MOUTH_FRAME_DURATION_MS[YGSOUL_MOUTH_CLOSED]);
+            lv_timer_reset(ygsoul_mouth_timer_);
+            lv_timer_resume(ygsoul_mouth_timer_);
+        }
+    }
 
+    void StopYGSoulSpeakingAnimation() {
+        ygsoul_mouth_speaking_ = false;
+        if (ygsoul_mouth_timer_ != nullptr) {
+            lv_timer_pause(ygsoul_mouth_timer_);
+        }
+        SetYGSoulMouthFrame(YGSOUL_MOUTH_CLOSED);
     }
 
     void ShowYGSoulCompanion() {
@@ -200,7 +205,12 @@ private:
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ygsoul_boot_image_, LV_OBJ_FLAG_HIDDEN);
+        if (!ygsoul_mouth_speaking_) {
+            SetYGSoulMouthFrame(YGSOUL_MOUTH_CLOSED);
+        }
+        RaiseYGSoulChrome();
         ApplyYGSoulOverlayStyle();
     }
 
@@ -210,11 +220,12 @@ private:
         }
 
         showing_boot_logo_ = true;
-        StopYGSoulMotion();
+        StopYGSoulSpeakingAnimation();
         lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(ygsoul_boot_image_, LV_OBJ_FLAG_HIDDEN);
         RaiseYGSoulChrome();
         ApplyYGSoulOverlayStyle();
@@ -262,9 +273,14 @@ public:
         ApplyYGSoulTheme();
         ygsoul_image_ = lv_image_create(lv_screen_active());
         lv_image_set_src(ygsoul_image_, ygsoul_companion_->image_dsc());
-        lv_image_set_scale(ygsoul_image_, 220);
         lv_obj_center(ygsoul_image_);
         lv_obj_add_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
+        ygsoul_mouth_image_ = lv_image_create(lv_screen_active());
+        lv_image_set_src(ygsoul_mouth_image_, YGSOUL_MOUTH_FRAMES[YGSOUL_MOUTH_CLOSED]);
+        lv_obj_align_to(
+            ygsoul_mouth_image_, ygsoul_image_, LV_ALIGN_TOP_LEFT,
+            YGSOUL_MOUTH_X, YGSOUL_MOUTH_Y);
+        lv_obj_add_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
         ygsoul_boot_image_ = lv_image_create(lv_screen_active());
         lv_image_set_src(ygsoul_boot_image_, ygsoul_boot_->image_dsc());
         lv_obj_center(ygsoul_boot_image_);
@@ -282,7 +298,11 @@ public:
             return;
         }
         ShowYGSoulCompanion();
-        StartYGSoulMotion(Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking);
+        if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking) {
+            StartYGSoulSpeakingAnimation();
+        } else {
+            StopYGSoulSpeakingAnimation();
+        }
     }
 
     virtual void SetStatus(const char* status) override {
@@ -290,7 +310,11 @@ public:
         const bool speaking = Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking;
         if (IsSetupUICalled() && !showing_boot_logo_) {
             DisplayLockGuard lock(this);
-            StartYGSoulMotion(speaking);
+            if (speaking) {
+                StartYGSoulSpeakingAnimation();
+            } else {
+                StopYGSoulSpeakingAnimation();
+            }
         }
     }
 
