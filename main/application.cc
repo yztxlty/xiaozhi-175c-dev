@@ -274,28 +274,19 @@ void Application::HandleNetworkConnectedEvent() {
         ReportDeviceUplink("telemetry");
         ReportDeviceUplink("event", "device.connected");
     }
-    if (state == kDeviceStateWifiConfiguring && management_client_ != nullptr) {
+    if (state == kDeviceStateWifiConfiguring && management_client_ != nullptr && protocol_ != nullptr) {
         ESP_LOGI(TAG, "Wi-Fi rejoined, resume listening");
-        EnterConversationListening(nullptr);
+        Schedule([this]() { EnterConversationListening(nullptr); });
         auto display = Board::GetInstance().GetDisplay();
         display->UpdateStatusBar(true);
         return;
     }
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
-        // Leave initializing immediately; protocol/listen continue in background.
+        // Pairing/ResetProtocol clears the chat session. Rebuild it; do not stay
+        // on connecting just because a leftover management client still exists.
         SetDeviceState(kDeviceStateConnecting);
-        if (activation_task_handle_ != nullptr) {
-            ESP_LOGW(TAG, "Activation task already running");
-            return;
-        }
-
-        xTaskCreate([](void* arg) {
-            Application* app = static_cast<Application*>(arg);
-            app->ActivationTask();
-            app->activation_task_handle_ = nullptr;
-            vTaskDelete(NULL);
-        }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
+        StartActivationIfNeeded();
     }
 
     // Update the status bar immediately to show the network state
@@ -505,9 +496,10 @@ void Application::InitializeProtocol() {
     auto display = board.GetDisplay();
     auto codec = board.GetAudioCodec();
 
-    if (ota_->HasWebsocketConfig()) {
+    if (protocol_ == nullptr) {
+    if (ota_ != nullptr && ota_->HasWebsocketConfig()) {
         protocol_ = std::make_unique<WebsocketProtocol>();
-    } else if (ota_->HasMqttConfig()) {
+    } else if (ota_ != nullptr && ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using websocket chat");
@@ -637,6 +629,9 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->Start();
+    }
+
+    if (management_client_ == nullptr) {
     management_client_ = std::make_unique<DeviceManagementClient>();
     management_client_->OnConnected([this]() {
         Schedule([this]() {
@@ -659,6 +654,7 @@ void Application::InitializeProtocol() {
         Schedule([this]() { ReportDeviceUplink("telemetry"); });
     });
     management_client_->Start();
+    }
 }
 
 void Application::HandleCustomMessage(const cJSON* root) {
@@ -1193,18 +1189,34 @@ void Application::SpeakPrompt(const char* text) {
     }
 }
 
+void Application::StartActivationIfNeeded() {
+    if (activation_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Activation task already running");
+        return;
+    }
+    xTaskCreate([](void* arg) {
+        Application* app = static_cast<Application*>(arg);
+        app->ActivationTask();
+        app->activation_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+    }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
+}
+
 void Application::EnterConversationListening(const char* prompt) {
     voice_dismissed_ = false;
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
     if (protocol_ == nullptr) {
-        SetDeviceState(kDeviceStateConnecting);
+        ESP_LOGW(TAG, "Chat protocol missing after wifi join, restart activation");
+        StartActivationIfNeeded();
         return;
     }
     if (!protocol_->IsAudioChannelOpened()) {
         SetDeviceState(kDeviceStateConnecting);
         if (!protocol_->OpenAudioChannel()) {
-            ESP_LOGW(TAG, "Open audio channel failed, stay connecting");
+            ESP_LOGW(TAG, "Open audio channel failed, wait for wake word");
+            SetDeviceState(kDeviceStateIdle);
+            audio_service_.EnableWakeWordDetection(true);
             return;
         }
     }
