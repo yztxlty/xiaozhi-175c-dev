@@ -127,6 +127,7 @@ private:
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
     std::unique_ptr<Protocol> protocol_;
+    std::unique_ptr<class DeviceManagementClient> management_client_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
@@ -140,6 +141,7 @@ private:
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    bool voice_dismissed_ = false;
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -163,6 +165,13 @@ private:
     void CheckAssetsVersion();
     void CheckNewVersion();
     void InitializeProtocol();
+    void HandleCustomMessage(const struct cJSON* root);
+    void ReportDeviceUplink(const char* report_type, const char* event_type = nullptr);
+    void EnterConversationListening(const char* prompt);
+    void EnterVoiceDismissed();
+    void SpeakPrompt(const char* text);
+    static bool IsVoiceDismissCommand(const char* text);
+    bool HandleWifiConfigVoiceCommand(const char* text);
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;

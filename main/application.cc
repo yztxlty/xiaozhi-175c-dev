@@ -5,7 +5,6 @@
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
 #include "websocket_protocol.h"
-#include "ydp_client.h"
 #include "device_management_client.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
@@ -16,6 +15,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <string>
 #include <freertos/queue.h>
 #include <esp_log.h>
 #include <cJSON.h>
@@ -275,16 +275,16 @@ void Application::HandleNetworkConnectedEvent() {
         ReportDeviceUplink("event", "device.connected");
     }
     if (state == kDeviceStateWifiConfiguring && management_client_ != nullptr) {
-        ESP_LOGI(TAG, "Wi-Fi rejoined, keep existing management session");
-        SetDeviceState(kDeviceStateIdle);
+        ESP_LOGI(TAG, "Wi-Fi rejoined, resume listening");
+        EnterConversationListening(nullptr);
         auto display = Board::GetInstance().GetDisplay();
         display->UpdateStatusBar(true);
         return;
     }
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
-        // Network is ready, start activation
-        SetDeviceState(kDeviceStateActivating);
+        // Leave initializing immediately; protocol/listen continue in background.
+        SetDeviceState(kDeviceStateConnecting);
         if (activation_task_handle_ != nullptr) {
             ESP_LOGW(TAG, "Activation task already running");
             return;
@@ -317,58 +317,43 @@ void Application::HandleNetworkDisconnectedEvent() {
 }
 
 void Application::HandleActivationDoneEvent() {
-    ESP_LOGI(TAG, "Activation done");
+    ESP_LOGI(TAG, "Activation done, enter listening");
 
     SystemInfo::PrintHeapStats();
-    SetDeviceState(kDeviceStateIdle);
-
-    has_server_time_ = ota_->HasServerTime();
-
-    auto display = Board::GetInstance().GetDisplay();
-    std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
-    display->ShowNotification(message.c_str());
-    display->SetChatMessage("system", "");
-
-    // Release OTA object after activation is complete
+    has_server_time_ = ota_ != nullptr && ota_->HasServerTime();
     ota_.reset();
+
+    ReportDeviceUplink("attributes");
+    ReportDeviceUplink("telemetry");
+    ReportDeviceUplink("event", "device.connected");
+
     auto& board = Board::GetInstance();
-    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     Schedule([this]() {
-        // Play the success sound to indicate the device is ready
-        audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+        EnterConversationListening("我已联网，现在可以对话啦");
     });
-
 }
 
 void Application::ActivationTask() {
-    // Create OTA object for activation process
+    // Create OTA object to fetch websocket/management endpoints.
+    // Pairing already finished; do not check firmware/assets versions,
+    // auto-upgrade, or wait for an activation code.
     ota_ = std::make_unique<Ota>();
-
-    // Check for new assets version
-    CheckAssetsVersion();
-
-    // Check for new firmware version
-    CheckNewVersion();
-
-    // Initialize YDP client for YGSoul cloud connectivity
-    auto& ydp = ygsoul::ydp::YdpClient::GetInstance();
-    ydp.SetYdpEndpoint("https://yomitest.gwcz.online/ydp/v1");
-    ydp.SetProductKey("ESP32S3");
-    ydp.SetDeviceId(SystemInfo::GetMacAddress());
-    ydp.SetAuthKey("test-auth-key");  // TODO: Load from secure storage
-
-    bool ydp_success = false;
-    std::string ydp_error;
-    ydp.Connect([&](bool success, const std::string& error) {
-        ydp_success = success;
-        ydp_error = error;
-    });
-
-    if (!ydp_success) {
-        ESP_LOGW(TAG, "YDP connection failed: %s, falling back to legacy protocol", ydp_error.c_str());
+    Settings websocket_settings("websocket", false);
+    Settings management_settings("management", false);
+    const bool have_local_endpoints = !websocket_settings.GetString("url").empty()
+        || !management_settings.GetString("url").empty();
+    if (have_local_endpoints) {
+        ESP_LOGI(TAG, "Reuse local websocket/management endpoints, skip version check");
     } else {
-        ESP_LOGI(TAG, "YDP connection succeeded, using YDP protocol");
+        esp_err_t err = ota_->CheckVersion();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Connection config fetch failed (0x%x), continue with local settings", err);
+        } else {
+            ota_->MarkCurrentVersionValid();
+            ota_->ConfirmPendingUpgrade();
+        }
     }
 
     // Initialize the protocol
@@ -520,15 +505,13 @@ void Application::InitializeProtocol() {
     auto display = board.GetDisplay();
     auto codec = board.GetAudioCodec();
 
-    display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
-
-    if (ota_->HasMqttConfig()) {
-        protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota_->HasWebsocketConfig()) {
+    if (ota_->HasWebsocketConfig()) {
         protocol_ = std::make_unique<WebsocketProtocol>();
-    } else {
-        ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
+    } else if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
+    } else {
+        ESP_LOGW(TAG, "No protocol specified in the OTA config, using websocket chat");
+        protocol_ = std::make_unique<WebsocketProtocol>();
     }
 
     protocol_->OnConnected([this]() {
@@ -602,7 +585,14 @@ void Application::InitializeProtocol() {
                 Schedule([display, message = std::string(text->valuestring)]() {
                     display->SetChatMessage("user", message.c_str());
                 });
+                if (IsVoiceDismissCommand(text->valuestring)) {
+                    Schedule([this]() { EnterVoiceDismissed(); });
+                } else if (HandleWifiConfigVoiceCommand(text->valuestring)) {
+                    // Enter/exit pairing immediately from STT, do not wait for the LLM.
+                }
             }
+        } else if (strcmp(type->valuestring, "device.standby") == 0) {
+            Schedule([this]() { EnterVoiceDismissed(); });
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
@@ -911,21 +901,12 @@ void Application::HandleToggleChatEvent() {
         return;
     }
 
-    if (state == kDeviceStateIdle) {
-        ListeningMode mode = GetDefaultListeningMode();
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update)
-            Schedule([this, mode]() {
-                ContinueOpenAudioChannel(mode);
-            });
-            return;
-        }
-        SetListeningMode(mode);
-    } else if (state == kDeviceStateSpeaking) {
+    if (voice_dismissed_ || state == kDeviceStateIdle) {
+        EnterConversationListening("在呢，可以正常实时拾音对话！");
+        return;
+    }
+    if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
-    } else if (state == kDeviceStateListening) {
-        protocol_->CloseAudioChannel();
     }
 }
 
@@ -1001,22 +982,17 @@ void Application::HandleWakeWordDetectedEvent() {
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
-    if (state == kDeviceStateIdle) {
-        audio_service_.EncodeWakeWord();
-        auto wake_word = audio_service_.GetLastWakeWord();
+    if (IsVoiceDismissCommand(wake_word.c_str())) {
+        EnterVoiceDismissed();
+        return;
+    }
 
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update),
-            // then continue with OpenAudioChannel which may block for ~1 second
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
-            });
-            return;
-        }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word);
-    } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
+    if (voice_dismissed_ || state == kDeviceStateIdle) {
+        EnterConversationListening("在呢，可以正常实时拾音对话！");
+        return;
+    }
+
+    if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
         // Clear send queue to avoid sending residues to server
         while (audio_service_.PopPacketFromSendQueue());
@@ -1171,6 +1147,82 @@ void Application::SetListeningMode(ListeningMode mode) {
 
 ListeningMode Application::GetDefaultListeningMode() const {
     return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;
+}
+
+bool Application::IsVoiceDismissCommand(const char* text) {
+    if (text == nullptr || text[0] == '\0') {
+        return false;
+    }
+    std::string value(text);
+    return value.find("退下") != std::string::npos || value.find("关机") != std::string::npos;
+}
+
+bool Application::HandleWifiConfigVoiceCommand(const char* text) {
+    if (text == nullptr || text[0] == '\0') {
+        return false;
+    }
+    if (Board::GetInstance().GetBoardType() != std::string("wifi")) {
+        return false;
+    }
+    std::string value(text);
+    if (value.find("退出配网") != std::string::npos) {
+        ESP_LOGI(TAG, "Voice command: exit wifi config immediately");
+        Schedule([]() {
+            static_cast<WifiBoard&>(Board::GetInstance()).ExitWifiConfigMode();
+        });
+        return true;
+    }
+    if (value.find("进入配网") != std::string::npos || value.find("打开配网") != std::string::npos) {
+        ESP_LOGI(TAG, "Voice command: enter wifi config");
+        Schedule([]() {
+            static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigModeForVoice();
+        });
+        return true;
+    }
+    return false;
+}
+
+void Application::SpeakPrompt(const char* text) {
+    if (text == nullptr || text[0] == '\0') {
+        return;
+    }
+    auto display = Board::GetInstance().GetDisplay();
+    display->SetChatMessage("assistant", text);
+    if (protocol_ != nullptr) {
+        protocol_->SendSpeakRequest(text);
+    }
+}
+
+void Application::EnterConversationListening(const char* prompt) {
+    voice_dismissed_ = false;
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    if (protocol_ == nullptr) {
+        SetDeviceState(kDeviceStateConnecting);
+        return;
+    }
+    if (!protocol_->IsAudioChannelOpened()) {
+        SetDeviceState(kDeviceStateConnecting);
+        if (!protocol_->OpenAudioChannel()) {
+            ESP_LOGW(TAG, "Open audio channel failed, stay connecting");
+            return;
+        }
+    }
+    SetListeningMode(GetDefaultListeningMode());
+    SpeakPrompt(prompt);
+}
+
+void Application::EnterVoiceDismissed() {
+    ESP_LOGI(TAG, "Voice dismissed, enter low power, wait for function key");
+    voice_dismissed_ = true;
+    if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    }
+    SetDeviceState(kDeviceStateIdle);
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(true);
 }
 
 void Application::Reboot() {

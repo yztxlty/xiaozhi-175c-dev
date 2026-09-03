@@ -35,6 +35,7 @@
         "ACCESS_VIA_BROWSER": " Config URL: ",
         "WIFI_CONFIG_MODE": "Wi-Fi Configuration Mode",
         "ENTERING_WIFI_CONFIG_MODE": "Entering Wi-Fi configuration mode...",
+        "EXITING_WIFI_CONFIG_MODE": "Leaving Wi-Fi configuration mode",
         "SCANNING_WIFI": "Scanning Wi-Fi...",
         "NEW_VERSION": "New version ",
         "OTA_UPGRADE": "OTA Upgrade",

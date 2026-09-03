@@ -59,6 +59,17 @@ public:
      * Enter WiFi configuration mode (thread-safe, can be called from any task)
      */
     void EnterWifiConfigMode();
+
+    /**
+     * Voice/MCP enter: start BLE provisioning without dropping the current Wi-Fi
+     * so the user can immediately say 退出配网模式.
+     */
+    void EnterWifiConfigModeForVoice();
+
+    /**
+     * Voice/MCP exit: stop BLE provisioning immediately.
+     */
+    void ExitWifiConfigMode();
     
     /**
      * Check if in WiFi config mode

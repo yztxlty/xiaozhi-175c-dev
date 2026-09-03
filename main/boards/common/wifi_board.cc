@@ -20,6 +20,7 @@
 #include <wifi_station.h>
 #include <ssid_manager.h>
 #include "afsk_demod.h"
+#include "mcp_server.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "blufi.h"
 #endif
@@ -42,6 +43,21 @@ WifiBoard::WifiBoard() {
         .skip_unhandled_events = true
     };
     esp_timer_create(&timer_args, &connect_timer_);
+
+    auto& mcp_server = McpServer::GetInstance();
+    mcp_server.AddTool("self.system.reconfigure_wifi",
+        "When the user says 进入配网模式, call this immediately and switch to pairing mode. "
+        "Do not ask for confirmation. Keep the current Wi-Fi so the user can still speak.",
+        PropertyList(), [this](const PropertyList&) {
+            EnterWifiConfigModeForVoice();
+            return true;
+        });
+    mcp_server.AddTool("self.system.exit_wifi_config",
+        "When the user says 退出配网模式, call this immediately and leave pairing mode. Do not wait.",
+        PropertyList(), [this](const PropertyList&) {
+            ExitWifiConfigMode();
+            return true;
+        });
 }
 
 WifiBoard::~WifiBoard() {
@@ -258,6 +274,30 @@ void WifiBoard::EnterWifiConfigMode() {
     WifiManager::GetInstance().StopStation();
 
     StartWifiConfigMode();
+}
+
+void WifiBoard::EnterWifiConfigModeForVoice() {
+    ESP_LOGI(TAG, "EnterWifiConfigModeForVoice called");
+    GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
+    if (IsInWifiConfigMode()) {
+        ESP_LOGI(TAG, "already in wifi config mode");
+        return;
+    }
+    StartWifiConfigMode();
+}
+
+void WifiBoard::ExitWifiConfigMode() {
+    ESP_LOGI(TAG, "ExitWifiConfigMode called");
+    GetDisplay()->ShowNotification(Lang::Strings::EXITING_WIFI_CONFIG_MODE);
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+    YgSoulBleProvisioning::GetInstance().Stop();
+#endif
+    in_config_mode_ = false;
+    if (WifiManager::GetInstance().IsConnected()) {
+        Application::GetInstance().SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+    OnNetworkEvent(NetworkEvent::WifiConfigModeExit);
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {
