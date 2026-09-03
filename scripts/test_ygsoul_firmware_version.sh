@@ -17,6 +17,8 @@ grep -Fq 'if (!client->Send("{\"type\":\"heartbeat\"}"))' main/device_management
 grep -Fq 'client->connected_ = false;' main/device_management_client.cc
 grep -q 'OnMessage' main/device_management_client.cc
 grep -q 'HandleCustomMessage' main/application.cc
+grep -q 'Reporting online immediately after Wi-Fi join' main/application.cc
+grep -q 'Wi-Fi rejoined, keep existing management session' main/application.cc
 grep -q 'strcmp(command->valuestring, "unbind") == 0' main/application.cc
 grep -q 'strcmp(command->valuestring, "factoryReset") == 0' main/application.cc
 grep -q 'cJSON_AddBoolToObject(reported, "unbound", true)' main/application.cc

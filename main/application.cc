@@ -268,6 +268,20 @@ void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     auto state = GetDeviceState();
 
+    if (management_client_ != nullptr) {
+        ESP_LOGI(TAG, "Reporting online immediately after Wi-Fi join");
+        ReportDeviceUplink("attributes");
+        ReportDeviceUplink("telemetry");
+        ReportDeviceUplink("event", "device.connected");
+    }
+    if (state == kDeviceStateWifiConfiguring && management_client_ != nullptr) {
+        ESP_LOGI(TAG, "Wi-Fi rejoined, keep existing management session");
+        SetDeviceState(kDeviceStateIdle);
+        auto display = Board::GetInstance().GetDisplay();
+        display->UpdateStatusBar(true);
+        return;
+    }
+
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
         // Network is ready, start activation
         SetDeviceState(kDeviceStateActivating);
@@ -710,6 +724,13 @@ void Application::HandleCustomMessage(const cJSON* root) {
         }
     } else if (strcmp(command->valuestring, "reportStatus") == 0) {
         succeeded = true;
+    } else if (strcmp(command->valuestring, "clearStorage") == 0) {
+        ESP_LOGI(TAG, "Custom command clearStorage requestId=%s", request_id->valuestring);
+        succeeded = Assets::GetInstance().PurgeTransient();
+        command_changes_telemetry = succeeded;
+        if (!succeeded) {
+            error_code = "storage_purge_failed";
+        }
     } else if (strcmp(command->valuestring, "unbind") == 0) {
         // Account unbind only: keep local Wi-Fi so the device stays reachable.
         ESP_LOGI(TAG, "Custom command unbind requestId=%s", request_id->valuestring);
@@ -735,6 +756,9 @@ void Application::HandleCustomMessage(const cJSON* root) {
         }
         if (succeeded && strcmp(command->valuestring, "factoryReset") == 0) {
             cJSON_AddBoolToObject(reported, "factoryReset", true);
+        }
+        if (succeeded && strcmp(command->valuestring, "clearStorage") == 0) {
+            cJSON_AddBoolToObject(reported, "storageCleaned", true);
         }
         cJSON_AddItemToObject(result, "reported", reported);
     }
