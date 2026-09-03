@@ -5,12 +5,18 @@
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
 #include "websocket_protocol.h"
+#include "ydp_client.h"
+#include "device_management_client.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "ssid_manager.h"
+#include "wifi_board.h"
 
+#include <atomic>
 #include <cstring>
+#include <freertos/queue.h>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
@@ -318,6 +324,7 @@ void Application::HandleActivationDoneEvent() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     });
+
 }
 
 void Application::ActivationTask() {
@@ -329,6 +336,26 @@ void Application::ActivationTask() {
 
     // Check for new firmware version
     CheckNewVersion();
+
+    // Initialize YDP client for YGSoul cloud connectivity
+    auto& ydp = ygsoul::ydp::YdpClient::GetInstance();
+    ydp.SetYdpEndpoint("https://yomitest.gwcz.online/ydp/v1");
+    ydp.SetProductKey("ESP32S3");
+    ydp.SetDeviceId(SystemInfo::GetMacAddress());
+    ydp.SetAuthKey("test-auth-key");  // TODO: Load from secure storage
+
+    bool ydp_success = false;
+    std::string ydp_error;
+    ydp.Connect([&](bool success, const std::string& error) {
+        ydp_success = success;
+        ydp_error = error;
+    });
+
+    if (!ydp_success) {
+        ESP_LOGW(TAG, "YDP connection failed: %s, falling back to legacy protocol", ydp_error.c_str());
+    } else {
+        ESP_LOGI(TAG, "YDP connection succeeded, using YDP protocol");
+    }
 
     // Initialize the protocol
     InitializeProtocol();
@@ -396,11 +423,12 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
-    const int MAX_RETRY = 10;
+    const int MAX_RETRY = 8;
     int retry_count = 0;
-    int retry_delay = 10; // Initial retry delay in seconds
+    int retry_delay = 3;
 
     auto& board = Board::GetInstance();
+    vTaskDelay(pdMS_TO_TICKS(2000));
     while (true) {
         auto display = board.GetDisplay();
         display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
@@ -413,20 +441,22 @@ void Application::CheckNewVersion() {
                 return;
             }
 
-            char error_message[128];
-            snprintf(error_message, sizeof(error_message), "code=%d, url=%s", err, ota_->GetCheckVersionUrl().c_str());
-            char buffer[256];
-            snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, error_message);
-            Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
+            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d) err=0x%x", retry_delay, retry_count, MAX_RETRY, err);
+            if (retry_count >= 3) {
+                char error_message[128];
+                snprintf(error_message, sizeof(error_message), "code=%d, url=%s", err, ota_->GetCheckVersionUrl().c_str());
+                char buffer[256];
+                snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, error_message);
+                Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
+            }
 
-            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d)", retry_delay, retry_count, MAX_RETRY);
             for (int i = 0; i < retry_delay; i++) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 if (GetDeviceState() == kDeviceStateIdle) {
                     break;
                 }
             }
-            retry_delay *= 2; // Double the retry delay
+            if (retry_delay < 20) retry_delay *= 2;
             continue;
         }
         retry_count = 0;
@@ -441,6 +471,7 @@ void Application::CheckNewVersion() {
 
         // No new version, mark the current version as valid
         ota_->MarkCurrentVersionValid();
+        ota_->ConfirmPendingUpgrade();
         if (!ota_->HasActivationCode() && !ota_->HasActivationChallenge()) {
             // Exit the loop if done checking new version
             break;
@@ -488,6 +519,9 @@ void Application::InitializeProtocol() {
 
     protocol_->OnConnected([this]() {
         DismissAlert();
+        ReportDeviceUplink("attributes");
+        ReportDeviceUplink("telemetry");
+        ReportDeviceUplink("event", "device.connected");
     });
 
     protocol_->OnNetworkError([this](const std::string& message) {
@@ -591,15 +625,7 @@ void Application::InitializeProtocol() {
             }
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {
-            auto payload = cJSON_GetObjectItem(root, "payload");
-            ESP_LOGI(TAG, "Received custom message: %s", cJSON_PrintUnformatted(root));
-            if (cJSON_IsObject(payload)) {
-                Schedule([this, display, payload_str = std::string(cJSON_PrintUnformatted(payload))]() {
-                    display->SetChatMessage("system", payload_str.c_str());
-                });
-            } else {
-                ESP_LOGW(TAG, "Invalid custom message format: missing payload");
-            }
+            HandleCustomMessage(root);
 #endif
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
@@ -607,6 +633,167 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->Start();
+    management_client_ = std::make_unique<DeviceManagementClient>();
+    management_client_->OnConnected([this]() {
+        Schedule([this]() {
+            ReportDeviceUplink("attributes");
+            ReportDeviceUplink("telemetry");
+            ReportDeviceUplink("event", "device.connected");
+        });
+    });
+    management_client_->OnMessage([this](const std::string& message) {
+        Schedule([this, message]() {
+            auto root = cJSON_Parse(message.c_str());
+            auto type = root == nullptr ? nullptr : cJSON_GetObjectItem(root, "type");
+            if (cJSON_IsString(type) && strcmp(type->valuestring, "custom") == 0) {
+                HandleCustomMessage(root);
+            }
+            cJSON_Delete(root);
+        });
+    });
+    management_client_->OnHeartbeat([this]() {
+        Schedule([this]() { ReportDeviceUplink("telemetry"); });
+    });
+    management_client_->Start();
+}
+
+void Application::HandleCustomMessage(const cJSON* root) {
+    auto payload = cJSON_GetObjectItem(root, "payload");
+    if (!cJSON_IsObject(payload)) {
+        ESP_LOGW(TAG, "Invalid custom message format: missing payload");
+        return;
+    }
+    auto display = Board::GetInstance().GetDisplay();
+    auto payload_text = cJSON_PrintUnformatted(payload);
+    Schedule([display, payload_str = std::string(payload_text == nullptr ? "" : payload_text)]() {
+        display->SetChatMessage("system", payload_str.c_str());
+    });
+    cJSON_free(payload_text);
+    auto request_id = cJSON_GetObjectItem(payload, "requestId");
+    auto command = cJSON_GetObjectItem(payload, "command");
+    if (!cJSON_IsString(request_id) || !cJSON_IsString(command)) {
+        return;
+    }
+    auto& board = Board::GetInstance();
+    bool succeeded = false;
+    bool command_changes_telemetry = false;
+    const char* error_code = nullptr;
+    if (strcmp(command->valuestring, "setVolume") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        auto value = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "value") : nullptr;
+        if (cJSON_IsNumber(value) && value->valueint >= 0 && value->valueint <= 100) {
+            board.GetAudioCodec()->SetOutputVolume(value->valueint);
+            succeeded = true;
+            command_changes_telemetry = true;
+        } else {
+            error_code = "invalid_params";
+        }
+    } else if (strcmp(command->valuestring, "setBrightness") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        auto value = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "value") : nullptr;
+        auto backlight = board.GetBacklight();
+        if (cJSON_IsNumber(value) && value->valueint >= 0 && value->valueint <= 100 && backlight != nullptr) {
+            backlight->SetBrightness(value->valueint, true);
+            succeeded = true;
+            command_changes_telemetry = true;
+        } else {
+            error_code = backlight == nullptr ? "unsupported_command" : "invalid_params";
+        }
+    } else if (strcmp(command->valuestring, "setAutoSleep") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        auto value = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "value") : nullptr;
+        if (cJSON_IsNumber(value) && board.SetAutoSleepMinutes(value->valueint)) {
+            succeeded = true;
+            command_changes_telemetry = true;
+        } else {
+            error_code = "invalid_params";
+        }
+    } else if (strcmp(command->valuestring, "reportStatus") == 0) {
+        succeeded = true;
+    } else if (strcmp(command->valuestring, "unbind") == 0) {
+        // Account unbind only: keep local Wi-Fi so the device stays reachable.
+        ESP_LOGI(TAG, "Custom command unbind requestId=%s", request_id->valuestring);
+        succeeded = true;
+    } else if (strcmp(command->valuestring, "factoryReset") == 0) {
+        ESP_LOGI(TAG, "Custom command factoryReset requestId=%s", request_id->valuestring);
+        SsidManager::GetInstance().Clear();
+        Settings wifi_settings("wifi", true);
+        wifi_settings.EraseAll();
+        succeeded = true;
+    } else {
+        error_code = "unsupported_command";
+    }
+    auto response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "type", "custom");
+    auto result = cJSON_AddObjectToObject(response, "payload");
+    cJSON_AddStringToObject(result, "requestId", request_id->valuestring);
+    cJSON_AddStringToObject(result, "status", succeeded ? "SUCCEEDED" : "FAILED");
+    if (error_code != nullptr) {
+        cJSON_AddStringToObject(result, "errorCode", error_code);
+    }
+    auto reported = cJSON_Parse(board.GetDeviceStatusJson().c_str());
+    if (reported != nullptr) {
+        if (succeeded && strcmp(command->valuestring, "unbind") == 0) {
+            cJSON_AddBoolToObject(reported, "unbound", true);
+        }
+        if (succeeded && strcmp(command->valuestring, "factoryReset") == 0) {
+            cJSON_AddBoolToObject(reported, "factoryReset", true);
+        }
+        cJSON_AddItemToObject(result, "reported", reported);
+    }
+    auto text = cJSON_PrintUnformatted(response);
+    if (text != nullptr) {
+        if (management_client_ != nullptr && management_client_->IsConnected()) {
+            management_client_->Send(text);
+        } else {
+            protocol_->SendDeviceMessage(text);
+        }
+        cJSON_free(text);
+    }
+    cJSON_Delete(response);
+    if (succeeded && command_changes_telemetry) {
+        ReportDeviceUplink("telemetry");
+    }
+    if (succeeded && strcmp(command->valuestring, "factoryReset") == 0) {
+        Schedule([this]() {
+            vTaskDelay(pdMS_TO_TICKS(800));
+            if (Board::GetInstance().GetBoardType() == "wifi") {
+                static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
+            } else {
+                Reboot();
+            }
+        });
+    }
+}
+
+void Application::ReportDeviceUplink(const char* report_type, const char* event_type) {
+    if (protocol_ == nullptr || report_type == nullptr) {
+        return;
+    }
+    auto response = cJSON_CreateObject();
+    auto payload = cJSON_AddObjectToObject(response, "payload");
+    cJSON_AddStringToObject(response, "type", "custom");
+    auto request_id = std::string("report-") + std::to_string(esp_timer_get_time());
+    cJSON_AddStringToObject(payload, "requestId", request_id.c_str());
+    cJSON_AddStringToObject(payload, "reportType", report_type);
+    cJSON_AddStringToObject(payload, "status", "SUCCEEDED");
+    if (event_type != nullptr) {
+        cJSON_AddStringToObject(payload, "eventType", event_type);
+    }
+    auto reported = cJSON_Parse(Board::GetInstance().GetDeviceStatusJson().c_str());
+    if (reported != nullptr) {
+        cJSON_AddItemToObject(payload, "reported", reported);
+    }
+    auto text = cJSON_PrintUnformatted(response);
+    if (text != nullptr) {
+        if (management_client_ != nullptr && management_client_->IsConnected()) {
+            management_client_->Send(text);
+        } else {
+            protocol_->SendDeviceMessage(text);
+        }
+        cJSON_free(text);
+    }
+    cJSON_Delete(response);
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -673,6 +860,12 @@ void Application::StopListening() {
 
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
+
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+    if (state == kDeviceStateWifiConfiguring) {
+        return;
+    }
+#endif
     
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
@@ -917,6 +1110,9 @@ void Application::HandleStateChangedEvent() {
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
+            display->SetStatus(Lang::Strings::WIFI_CONFIG_MODE);
+            display->SetEmotion("neutral");
+            display->SetChatMessage("system", "BLE 配网广播已开启");
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(false);
             break;
@@ -990,17 +1186,63 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     audio_service_.Stop();
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    bool upgrade_success = Ota::Upgrade(upgrade_url, [this, display](int progress, size_t speed) {
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
-        Schedule([display, message = std::string(buffer)]() {
-            display->SetChatMessage("system", message.c_str());
-        });
-    });
+    ota_->PersistPendingUpgrade();
+
+    struct UpgradeContext {
+        Application* app;
+        Ota* ota;
+        Display* display;
+        QueueHandle_t progress_queue;
+        std::atomic<bool> done{false};
+        bool success = false;
+        int last_progress_bucket = 0;
+    } upgrade_context{this, ota_.get(), display, xQueueCreate(1, sizeof(int))};
+
+    bool upgrade_success = false;
+    if (upgrade_context.progress_queue == nullptr) {
+        ESP_LOGE(TAG, "Failed to create OTA progress queue");
+    } else {
+        auto task_created = xTaskCreate([](void* arg) {
+            auto* context = static_cast<UpgradeContext*>(arg);
+            context->success = context->ota->StartUpgrade([context](int progress, size_t speed) {
+                char buffer[32];
+                snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
+                context->app->Schedule([display = context->display, message = std::string(buffer)]() {
+                    display->SetChatMessage("system", message.c_str());
+                });
+
+                int progress_bucket = progress / 10 * 10;
+                if (progress_bucket >= 10 && progress_bucket < 100 &&
+                    progress_bucket > context->last_progress_bucket) {
+                    context->last_progress_bucket = progress_bucket;
+                    xQueueOverwrite(context->progress_queue, &progress_bucket);
+                }
+            });
+            context->done.store(true, std::memory_order_release);
+            vTaskDelete(nullptr);
+        }, "ota_download", 4096 * 2, &upgrade_context, 2, nullptr);
+
+        if (task_created != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create OTA download task");
+            vQueueDelete(upgrade_context.progress_queue);
+        } else {
+            ota_->ReportProgress("RUNNING", 1, "开始下载升级包");
+            while (!upgrade_context.done.load(std::memory_order_acquire)) {
+                int progress = 0;
+                if (xQueueReceive(upgrade_context.progress_queue, &progress, pdMS_TO_TICKS(250)) == pdTRUE &&
+                    !upgrade_context.done.load(std::memory_order_acquire)) {
+                    ota_->ReportProgress("RUNNING", progress, "升级包下载中");
+                }
+            }
+            upgrade_success = upgrade_context.success;
+            vQueueDelete(upgrade_context.progress_queue);
+        }
+    }
 
     if (!upgrade_success) {
         // Upgrade failed, restart audio service and continue running
         ESP_LOGE(TAG, "Firmware upgrade failed, restarting audio service and continuing operation...");
+        ota_->ReportProgress("FAILED", 0, "下载、校验或写入升级包失败");
         audio_service_.Start(); // Restart audio service
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
         Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
@@ -1116,4 +1358,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-
