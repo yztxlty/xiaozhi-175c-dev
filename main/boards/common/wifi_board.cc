@@ -236,6 +236,19 @@ void WifiBoard::StartWifiConfigMode() {
 void WifiBoard::EnterWifiConfigMode() {
     ESP_LOGI(TAG, "EnterWifiConfigMode called");
     GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
+    if (IsInWifiConfigMode()) {
+        ESP_LOGI(TAG, "already in wifi config mode");
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+        YgSoulBleProvisioning::GetInstance().EnsureAdvertising();
+#endif
+        return;
+    }
+
+    if (WifiManager::GetInstance().IsConnected()) {
+        ESP_LOGI(TAG, "Wi-Fi already connected, keep station and start BLE pairing");
+        StartWifiConfigMode();
+        return;
+    }
 
     auto& app = Application::GetInstance();
     auto state = app.GetDeviceState();
@@ -243,22 +256,11 @@ void WifiBoard::EnterWifiConfigMode() {
     if (state == kDeviceStateSpeaking || state == kDeviceStateListening || state == kDeviceStateIdle
         || state == kDeviceStateActivating || state == kDeviceStateConnecting
         || state == kDeviceStateUpgrading || state == kDeviceStateUnknown) {
-        // Reset protocol (close audio channel, reset protocol)
-        Application::GetInstance().ResetProtocol();
-
         xTaskCreate([](void* arg) {
             auto* board = static_cast<WifiBoard*>(arg);
-
-            // Wait for 1 second to allow speaking to finish gracefully
             vTaskDelay(pdMS_TO_TICKS(1000));
-
-            // Stop any ongoing connection attempt
             esp_timer_stop(board->connect_timer_);
-            WifiManager::GetInstance().StopStation();
-
-            // Enter config mode
             board->StartWifiConfigMode();
-
             vTaskDelete(NULL);
         }, "wifi_cfg_delay", 4096, this, 2, NULL);
         return;
@@ -269,10 +271,7 @@ void WifiBoard::EnterWifiConfigMode() {
         return;
     }
 
-    // Stop any ongoing connection attempt
     esp_timer_stop(connect_timer_);
-    WifiManager::GetInstance().StopStation();
-
     StartWifiConfigMode();
 }
 
@@ -293,11 +292,7 @@ void WifiBoard::ExitWifiConfigMode() {
     YgSoulBleProvisioning::GetInstance().Stop();
 #endif
     in_config_mode_ = false;
-    if (WifiManager::GetInstance().IsConnected()) {
-        Application::GetInstance().SetDeviceState(kDeviceStateIdle);
-        return;
-    }
-    OnNetworkEvent(NetworkEvent::WifiConfigModeExit);
+    Application::GetInstance().EnterStandby();
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {
@@ -412,8 +407,17 @@ std::string WifiBoard::GetDeviceStatusJson() {
     cJSON_AddStringToObject(network, "signal", signal);
     cJSON_AddItemToObject(root, "network", network);
 
-    auto storage_free = Assets::GetInstance().GetFreeSpace();
+    auto& assets = Assets::GetInstance();
+    auto storage_free = assets.GetFreeSpace();
+    auto storage_total = assets.GetTotalSize();
     cJSON_AddNumberToObject(root, "storageFree", storage_free);
+    cJSON_AddNumberToObject(root, "storageTotal", storage_total);
+    if (storage_total >= 1024 * 1024) {
+        int total_mb = static_cast<int>(storage_total / (1024 * 1024));
+        int free_mb = static_cast<int>(storage_free / (1024 * 1024));
+        cJSON_AddNumberToObject(root, "totalStorageMb", total_mb);
+        cJSON_AddNumberToObject(root, "usedStorageMb", total_mb > free_mb ? total_mb - free_mb : 0);
+    }
 
     int auto_sleep_minutes = board.GetAutoSleepMinutes();
     if (auto_sleep_minutes > 0) {

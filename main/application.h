@@ -107,6 +107,7 @@ public:
     void WakeWordInvoke(const std::string& wake_word);
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
+    void EnterStandby();
     void SendMcpMessage(const std::string& payload);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
@@ -169,7 +170,9 @@ private:
     void ReportDeviceUplink(const char* report_type, const char* event_type = nullptr);
     void EnterConversationListening(const char* prompt);
     void EnterVoiceDismissed();
+    void ListenForPairingCommand();
     void SpeakPrompt(const char* text);
+    void StartActivationIfNeeded();
     static bool IsVoiceDismissCommand(const char* text);
     bool HandleWifiConfigVoiceCommand(const char* text);
     void ShowActivationCode(const std::string& code, const std::string& message);

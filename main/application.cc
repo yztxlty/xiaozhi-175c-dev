@@ -12,6 +12,9 @@
 #include "settings.h"
 #include "ssid_manager.h"
 #include "wifi_board.h"
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+#include "ygsoul_ble_provisioning.h"
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -260,6 +263,11 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+            if (GetDeviceState() == kDeviceStateWifiConfiguring) {
+                YgSoulBleProvisioning::GetInstance().EnsureAdvertising();
+            }
+#endif
         }
     }
 }
@@ -274,17 +282,25 @@ void Application::HandleNetworkConnectedEvent() {
         ReportDeviceUplink("telemetry");
         ReportDeviceUplink("event", "device.connected");
     }
-    if (state == kDeviceStateWifiConfiguring && management_client_ != nullptr && protocol_ != nullptr) {
-        ESP_LOGI(TAG, "Wi-Fi rejoined, resume listening");
-        Schedule([this]() { EnterConversationListening(nullptr); });
+    if (state == kDeviceStateWifiConfiguring) {
+        ESP_LOGI(TAG, "Wi-Fi up while pairing, keep BLE advertising and wait for 结束配网");
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+        YgSoulBleProvisioning::GetInstance().EnsureAdvertising();
+#endif
+        if (protocol_ == nullptr) {
+            SetDeviceState(kDeviceStateConnecting);
+            StartActivationIfNeeded();
+        } else {
+            ReportDeviceUplink("attributes");
+            ReportDeviceUplink("telemetry");
+            ReportDeviceUplink("event", "device.connected");
+        }
         auto display = Board::GetInstance().GetDisplay();
         display->UpdateStatusBar(true);
         return;
     }
 
-    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
-        // Pairing/ResetProtocol clears the chat session. Rebuild it; do not stay
-        // on connecting just because a leftover management client still exists.
+    if (state == kDeviceStateStarting) {
         SetDeviceState(kDeviceStateConnecting);
         StartActivationIfNeeded();
     }
@@ -308,7 +324,7 @@ void Application::HandleNetworkDisconnectedEvent() {
 }
 
 void Application::HandleActivationDoneEvent() {
-    ESP_LOGI(TAG, "Activation done, enter listening");
+    ESP_LOGI(TAG, "Activation done");
 
     SystemInfo::PrintHeapStats();
     has_server_time_ = ota_ != nullptr && ota_->HasServerTime();
@@ -318,12 +334,11 @@ void Application::HandleActivationDoneEvent() {
     ReportDeviceUplink("telemetry");
     ReportDeviceUplink("event", "device.connected");
 
-    auto& board = Board::GetInstance();
-    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-
-    Schedule([this]() {
-        EnterConversationListening("我已联网，现在可以对话啦");
-    });
+    if (GetDeviceState() == kDeviceStateWifiConfiguring) {
+        ESP_LOGI(TAG, "Activation done while pairing, stay in wifi config");
+        return;
+    }
+    EnterStandby();
 }
 
 void Application::ActivationTask() {
@@ -537,7 +552,9 @@ void Application::InitializeProtocol() {
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
-            SetDeviceState(kDeviceStateIdle);
+            if (GetDeviceState() != kDeviceStateWifiConfiguring) {
+                SetDeviceState(kDeviceStateIdle);
+            }
         });
     });
     
@@ -580,7 +597,9 @@ void Application::InitializeProtocol() {
                 if (IsVoiceDismissCommand(text->valuestring)) {
                     Schedule([this]() { EnterVoiceDismissed(); });
                 } else if (HandleWifiConfigVoiceCommand(text->valuestring)) {
-                    // Enter/exit pairing immediately from STT, do not wait for the LLM.
+                    // Pairing voice commands only.
+                } else if (GetDeviceState() == kDeviceStateWifiConfiguring) {
+                    AbortSpeaking(kAbortReasonNone);
                 }
             }
         } else if (strcmp(type->valuestring, "device.standby") == 0) {
@@ -897,11 +916,10 @@ void Application::HandleToggleChatEvent() {
         return;
     }
 
-    if (voice_dismissed_ || state == kDeviceStateIdle) {
-        EnterConversationListening("在呢，可以正常实时拾音对话！");
+    if (state == kDeviceStateIdle) {
+        ESP_LOGI(TAG, "Standby ignores button chat; wait for wake word");
         return;
-    }
-    if (state == kDeviceStateSpeaking) {
+    } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     }
 }
@@ -978,13 +996,31 @@ void Application::HandleWakeWordDetectedEvent() {
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
+    if (state == kDeviceStateWifiConfiguring) {
+        ESP_LOGI(TAG, "Wake word in pairing, listen for 结束配网");
+        ListenForPairingCommand();
+        return;
+    }
+
     if (IsVoiceDismissCommand(wake_word.c_str())) {
         EnterVoiceDismissed();
         return;
     }
 
-    if (voice_dismissed_ || state == kDeviceStateIdle) {
-        EnterConversationListening("在呢，可以正常实时拾音对话！");
+    if (state == kDeviceStateIdle) {
+        audio_service_.EncodeWakeWord();
+        auto detected = audio_service_.GetLastWakeWord();
+        if (!protocol_->IsAudioChannelOpened()) {
+            SetDeviceState(kDeviceStateConnecting);
+            Schedule([this, detected]() {
+                ContinueWakeWordInvoke(detected);
+            });
+            return;
+        }
+        voice_dismissed_ = false;
+        play_popup_on_listening_ = true;
+        protocol_->SendWakeWordDetected(detected);
+        SetListeningMode(GetDefaultListeningMode());
         return;
     }
 
@@ -1112,7 +1148,7 @@ void Application::HandleStateChangedEvent() {
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "BLE 配网广播已开启");
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(false);
+            audio_service_.EnableWakeWordDetection(true);
             break;
         default:
             // Do nothing
@@ -1161,8 +1197,9 @@ bool Application::HandleWifiConfigVoiceCommand(const char* text) {
         return false;
     }
     std::string value(text);
-    if (value.find("退出配网") != std::string::npos) {
+    if (value.find("结束配网") != std::string::npos || value.find("退出配网") != std::string::npos) {
         ESP_LOGI(TAG, "Voice command: exit wifi config immediately");
+        AbortSpeaking(kAbortReasonNone);
         Schedule([]() {
             static_cast<WifiBoard&>(Board::GetInstance()).ExitWifiConfigMode();
         });
@@ -1170,8 +1207,9 @@ bool Application::HandleWifiConfigVoiceCommand(const char* text) {
     }
     if (value.find("进入配网") != std::string::npos || value.find("打开配网") != std::string::npos) {
         ESP_LOGI(TAG, "Voice command: enter wifi config");
+        AbortSpeaking(kAbortReasonNone);
         Schedule([]() {
-            static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigModeForVoice();
+            static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
         });
         return true;
     }
@@ -1224,16 +1262,39 @@ void Application::EnterConversationListening(const char* prompt) {
     SpeakPrompt(prompt);
 }
 
-void Application::EnterVoiceDismissed() {
-    ESP_LOGI(TAG, "Voice dismissed, enter low power, wait for function key");
+void Application::EnterStandby() {
+    ESP_LOGI(TAG, "Enter standby, wake word only");
     voice_dismissed_ = true;
-    if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
-        protocol_->CloseAudioChannel();
+    if (protocol_ != nullptr) {
+        protocol_->SendStopListening();
+        if (protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        }
     }
     SetDeviceState(kDeviceStateIdle);
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(true);
+}
+
+void Application::EnterVoiceDismissed() {
+    ESP_LOGI(TAG, "Voice dismissed, enter standby");
+    EnterStandby();
+}
+
+void Application::ListenForPairingCommand() {
+    if (protocol_ == nullptr) {
+        return;
+    }
+    if (!protocol_->IsAudioChannelOpened()) {
+        if (!protocol_->OpenAudioChannel()) {
+            ESP_LOGW(TAG, "Pairing listen skipped, audio channel unavailable");
+            return;
+        }
+    }
+    protocol_->SendStartListening(GetDefaultListeningMode());
+    audio_service_.EnableVoiceProcessing(true);
     audio_service_.EnableWakeWordDetection(true);
 }
 

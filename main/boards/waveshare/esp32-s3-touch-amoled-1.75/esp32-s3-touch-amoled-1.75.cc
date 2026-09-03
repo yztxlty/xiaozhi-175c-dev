@@ -9,7 +9,6 @@
 #include "application.h"
 #include "button.h"
 #include "led/single_led.h"
-#include "mcp_server.h"
 #include "config.h"
 #include "power_save_timer.h"
 #include "axp2101.h"
@@ -17,6 +16,7 @@
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
+#include <esp_timer.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_master.h>
 #include "esp_io_expander_tca9554.h"
@@ -27,6 +27,9 @@
 #include <lvgl.h>
 
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
+
+static constexpr uint32_t PWR_BUTTON_INPUT_MASK = 1U << IO_EXPANDER_PIN_NUM_4;
+static constexpr int64_t PWR_BUTTON_LONG_PRESS_US = 3 * 1000 * 1000;
 
 // YGSoul display-only styling. Keep these values local to this board so other
 // boards and the conversation state machine keep their existing behavior.
@@ -51,7 +54,7 @@ class Pmic : public Axp2101 {
 public:
     Pmic(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : Axp2101(i2c_bus, addr) {
         WriteReg(0x22, 0b110); // PWRON > OFFLEVEL as POWEROFF Source enable
-        WriteReg(0x27, 0x10);  // hold 4s to power off
+        WriteReg(0x27, 0x1C);  // hold 10s to power off
 
         // Disable All DCs but DC1
         WriteReg(0x80, 0x01);
@@ -302,8 +305,13 @@ public:
             return;
         }
         DisplayLockGuard lock(this);
-        if (showing_boot_logo_ &&
-            Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+        const auto state = Application::GetInstance().GetDeviceState();
+        const bool conversation_ui =
+            state == kDeviceStateIdle ||
+            state == kDeviceStateConnecting ||
+            state == kDeviceStateListening ||
+            state == kDeviceStateSpeaking;
+        if (showing_boot_logo_ && !conversation_ui) {
             return;
         }
         ShowYGSoulCompanion();
@@ -329,10 +337,10 @@ public:
 
     virtual void SetChatMessage(const char* role, const char* content) override {
         LcdDisplay::SetChatMessage(role, content);
+        DisplayLockGuard lock(this);
         ygsoul_chat_message_is_system_ = role != nullptr && strcmp(role, "system") == 0;
         ApplyYGSoulChatMessageColor();
         if (chat_message_label_ != nullptr && content != nullptr && content[0] != '\0') {
-            DisplayLockGuard lock(this);
             lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
             RaiseYGSoulChrome();
         }
@@ -375,18 +383,98 @@ private:
     CustomBacklight* backlight_;
     esp_io_expander_handle_t io_expander = NULL;
     PowerSaveTimer* power_save_timer_;
+    esp_timer_handle_t pwr_button_timer_ = nullptr;
+    bool pwr_button_pressed_ = false;
+    bool pwr_button_long_pressed_ = false;
+    bool super_power_save_ = false;
+    int64_t pwr_button_pressed_at_us_ = 0;
 
     void InitializePowerSaveTimer() {
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        // 保留 Wi-Fi / WSS 会话；该设备只进入低亮度省电模式，绝不由空闲计时器断电。
+        power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(true);
-            GetBacklight()->SetBrightness(20); });
+            EnterSuperPowerSave();
+        });
         power_save_timer_->OnExitSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(false);
-            GetBacklight()->RestoreBrightness(); });
-        power_save_timer_->OnShutdownRequest([this](){ 
-            pmic_->PowerOff(); });
+            GetBacklight()->RestoreBrightness();
+        });
         power_save_timer_->SetEnabled(true);
+    }
+
+    void EnterSuperPowerSave() {
+        if (super_power_save_) {
+            return;
+        }
+        super_power_save_ = true;
+        GetDisplay()->SetPowerSaveMode(true);
+        GetBacklight()->SetBrightness(1);
+        auto& audio = Application::GetInstance().GetAudioService();
+        audio.EnableVoiceProcessing(false);
+        audio.EnableWakeWordDetection(false);
+        ESP_LOGI(TAG, "PWR: enter super power save");
+    }
+
+    void ExitSuperPowerSave() {
+        if (!super_power_save_) {
+            return;
+        }
+        super_power_save_ = false;
+        power_save_timer_->WakeUp();
+        GetDisplay()->SetPowerSaveMode(false);
+        GetBacklight()->RestoreBrightness();
+        auto& audio = Application::GetInstance().GetAudioService();
+        audio.EnableVoiceProcessing(false);
+        audio.EnableWakeWordDetection(true);
+        ESP_LOGI(TAG, "PWR: exit super power save");
+    }
+
+    void HandlePwrButton() {
+        if (io_expander == NULL) {
+            return;
+        }
+        uint32_t levels = 0;
+        if (esp_io_expander_get_level(io_expander, PWR_BUTTON_INPUT_MASK, &levels) != ESP_OK) {
+            ESP_LOGW(TAG, "PWR: failed to read EXIO4");
+            return;
+        }
+        const bool pressed = (levels & PWR_BUTTON_INPUT_MASK) != 0;
+        const int64_t now_us = esp_timer_get_time();
+        if (pressed && !pwr_button_pressed_) {
+            pwr_button_pressed_ = true;
+            pwr_button_long_pressed_ = false;
+            pwr_button_pressed_at_us_ = now_us;
+            return;
+        }
+        if (pressed && !pwr_button_long_pressed_ && now_us - pwr_button_pressed_at_us_ >= PWR_BUTTON_LONG_PRESS_US) {
+            pwr_button_long_pressed_ = true;
+            EnterSuperPowerSave();
+            return;
+        }
+        if (!pressed && pwr_button_pressed_) {
+            if (!pwr_button_long_pressed_) {
+                if (super_power_save_) {
+                    ExitSuperPowerSave();
+                } else {
+                    EnterSuperPowerSave();
+                }
+            }
+            pwr_button_pressed_ = false;
+        }
+    }
+
+    void InitializePwrButton() {
+        esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) {
+                static_cast<WaveshareEsp32s3TouchAMOLED1inch75*>(arg)->HandlePwrButton();
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "pwr_btn",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &pwr_button_timer_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(pwr_button_timer_, 20 * 1000));
     }
 
     void InitializeCodecI2c() {
@@ -436,6 +524,10 @@ private:
                 return;
             }
             app.ToggleChatState();
+        });
+
+        boot_button_.OnLongPress([this]() {
+            EnterWifiConfigMode();
         });
 
 #if CONFIG_USE_DEVICE_AEC
@@ -518,31 +610,17 @@ private:
         ESP_LOGI(TAG, "Touch panel initialized successfully");
     }
 
-    // 初始化工具
-    void InitializeTools() {
-        auto &mcp_server = McpServer::GetInstance();
-        mcp_server.AddTool("self.system.reconfigure_wifi",
-            "End this conversation and enter WiFi configuration mode.\n"
-            "**CAUTION** You must ask the user to confirm this action.",
-            PropertyList(), [this](const PropertyList& properties) {
-                EnterWifiConfigMode();
-                return true;
-            });
-    }
-
 public:
-    WaveshareEsp32s3TouchAMOLED1inch75() : boot_button_(BOOT_BUTTON_GPIO) {
+    WaveshareEsp32s3TouchAMOLED1inch75() : boot_button_(BOOT_BUTTON_GPIO, false, 3000) {
         InitializePowerSaveTimer();
         InitializeCodecI2c();
-#if CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75
         InitializeTca9554();
-#endif
         InitializeAxp2101();
         InitializeSpi();
         InitializeDisplay();
         InitializeTouch();
         InitializeButtons();
-        InitializeTools();
+        InitializePwrButton();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
