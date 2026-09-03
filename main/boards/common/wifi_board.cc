@@ -4,12 +4,15 @@
 #include "application.h"
 #include "system_info.h"
 #include "settings.h"
+#include "assets.h"
 #include "assets/lang_config.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_network.h>
 #include <esp_log.h>
+#include <esp_app_desc.h>
+#include <algorithm>
 #include <utility>
 
 #include <font_awesome.h>
@@ -19,6 +22,9 @@
 #include "afsk_demod.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "blufi.h"
+#endif
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+#include "ygsoul_ble_provisioning.h"
 #endif
 
 static const char *TAG = "WifiBoard";
@@ -112,6 +118,9 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             // make sure blufi resources has been released
             Blufi::GetInstance().deinit();
 #endif
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+            YgSoulBleProvisioning::GetInstance().OnNetworkEvent(event, data);
+#endif
             in_config_mode_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
             break;
@@ -123,6 +132,13 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             break;
         case NetworkEvent::Disconnected:
             ESP_LOGW(TAG, "WiFi disconnected");
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+            YgSoulBleProvisioning::GetInstance().OnNetworkEvent(event, data);
+#endif
+            // A device can receive an IP and then lose Wi-Fi. Restart the
+            // bounded recovery timer so it cannot remain in silent retries.
+            esp_timer_stop(connect_timer_);
+            esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
             break;
         case NetworkEvent::WifiConfigModeEnter:
             ESP_LOGI(TAG, "WiFi config mode entered");
@@ -160,7 +176,12 @@ void WifiBoard::StartWifiConfigMode() {
     in_config_mode_ = true;
     // Transition to wifi configuring state
     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
-#ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+    if (YgSoulBleProvisioning::GetInstance().Start() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start YGSoul BLE provisioning");
+        in_config_mode_ = false;
+    }
+#elif CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
     auto& wifi_manager = WifiManager::GetInstance();
 
     wifi_manager.StartConfigAp();
@@ -203,7 +224,9 @@ void WifiBoard::EnterWifiConfigMode() {
     auto& app = Application::GetInstance();
     auto state = app.GetDeviceState();
 
-    if (state == kDeviceStateSpeaking || state == kDeviceStateListening || state == kDeviceStateIdle) {
+    if (state == kDeviceStateSpeaking || state == kDeviceStateListening || state == kDeviceStateIdle
+        || state == kDeviceStateActivating || state == kDeviceStateConnecting
+        || state == kDeviceStateUpgrading || state == kDeviceStateUnknown) {
         // Reset protocol (close audio channel, reset protocol)
         Application::GetInstance().ResetProtocol();
 
@@ -238,7 +261,7 @@ void WifiBoard::EnterWifiConfigMode() {
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {
-    return WifiManager::GetInstance().IsConfigMode();
+    return in_config_mode_ || WifiManager::GetInstance().IsConfigMode();
 }
 
 NetworkInterface* WifiBoard::GetNetwork() {
@@ -302,6 +325,13 @@ std::string WifiBoard::GetDeviceStatusJson() {
     auto& board = Board::GetInstance();
     auto root = cJSON_CreateObject();
 
+    auto vendor_sn = SystemInfo::GetMacAddress();
+    vendor_sn.erase(std::remove(vendor_sn.begin(), vendor_sn.end(), ':'), vendor_sn.end());
+    cJSON_AddStringToObject(root, "vendorSn", vendor_sn.c_str());
+    cJSON_AddStringToObject(root, "productKey", "ESP32S3");
+    cJSON_AddStringToObject(root, "hardwareVersion", BOARD_NAME);
+    cJSON_AddStringToObject(root, "firmwareVersion", esp_app_get_description()->version);
+
     // Audio speaker
     auto audio_speaker = cJSON_CreateObject();
     if (auto codec = board.GetAudioCodec()) {
@@ -337,9 +367,18 @@ std::string WifiBoard::GetDeviceStatusJson() {
     cJSON_AddStringToObject(network, "type", "wifi");
     cJSON_AddStringToObject(network, "ssid", wifi.GetSsid().c_str());
     int rssi = wifi.GetRssi();
+    cJSON_AddNumberToObject(network, "rssi", rssi);
     const char* signal = rssi >= -60 ? "strong" : (rssi >= -70 ? "medium" : "weak");
     cJSON_AddStringToObject(network, "signal", signal);
     cJSON_AddItemToObject(root, "network", network);
+
+    auto storage_free = Assets::GetInstance().GetFreeSpace();
+    cJSON_AddNumberToObject(root, "storageFree", storage_free);
+
+    int auto_sleep_minutes = board.GetAutoSleepMinutes();
+    if (auto_sleep_minutes > 0) {
+        cJSON_AddNumberToObject(root, "autoSleep", auto_sleep_minutes);
+    }
 
     // Chip temperature
     float temp = 0.0f;

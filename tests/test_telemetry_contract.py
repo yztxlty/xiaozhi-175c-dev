@@ -35,11 +35,16 @@ def test_management_commands_ack_unbind_without_wiping_wifi():
     assert 'EnterWifiConfigMode' not in unbind_block
 
 
-def test_management_commands_factory_reset_clears_wifi_then_acks():
+def test_management_commands_factory_reset_acks_before_wiping_wifi():
     source = (ROOT / "main/application.cc").read_text()
     assert 'strcmp(command->valuestring, "factoryReset") == 0' in source
-    assert 'SsidManager::GetInstance().Clear()' in source
     assert 'cJSON_AddBoolToObject(reported, "factoryReset", true)' in source
+    assert 'factoryReset ACK sent, wiping wifi after flush' in source
+    ack_idx = source.index('cJSON_AddBoolToObject(reported, "factoryReset", true)')
+    wipe_idx = source.index('SsidManager::GetInstance().Clear()')
+    assert ack_idx < wipe_idx
+    board = (ROOT / "main/boards/common/wifi_board.cc").read_text()
+    assert 'kDeviceStateActivating' in board
     assert 'EnterWifiConfigMode' in source
 
 
@@ -66,7 +71,7 @@ if __name__ == "__main__":
     test_wifi_status_exposes_real_rssi_and_asset_storage_free_bytes()
     test_management_commands_cover_reported_volume_and_brightness()
     test_management_commands_ack_unbind_without_wiping_wifi()
-    test_management_commands_factory_reset_clears_wifi_then_acks()
+    test_management_commands_factory_reset_acks_before_wiping_wifi()
     test_management_commands_cover_supported_auto_sleep_and_periodic_telemetry()
     test_device_attributes_expose_real_identity_and_firmware_metadata()
     print("PASS: telemetry contract")

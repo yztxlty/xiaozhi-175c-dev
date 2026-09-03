@@ -716,9 +716,6 @@ void Application::HandleCustomMessage(const cJSON* root) {
         succeeded = true;
     } else if (strcmp(command->valuestring, "factoryReset") == 0) {
         ESP_LOGI(TAG, "Custom command factoryReset requestId=%s", request_id->valuestring);
-        SsidManager::GetInstance().Clear();
-        Settings wifi_settings("wifi", true);
-        wifi_settings.EraseAll();
         succeeded = true;
     } else {
         error_code = "unsupported_command";
@@ -755,8 +752,13 @@ void Application::HandleCustomMessage(const cJSON* root) {
         ReportDeviceUplink("telemetry");
     }
     if (succeeded && strcmp(command->valuestring, "factoryReset") == 0) {
+        ESP_LOGI(TAG, "factoryReset ACK sent, wiping wifi after flush");
         Schedule([this]() {
-            vTaskDelay(pdMS_TO_TICKS(800));
+            vTaskDelay(pdMS_TO_TICKS(2500));
+            SsidManager::GetInstance().Clear();
+            Settings wifi_settings("wifi", true);
+            wifi_settings.EraseAll();
+            ESP_LOGI(TAG, "factoryReset wiped wifi, entering config mode");
             if (Board::GetInstance().GetBoardType() == "wifi") {
                 static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
             } else {
