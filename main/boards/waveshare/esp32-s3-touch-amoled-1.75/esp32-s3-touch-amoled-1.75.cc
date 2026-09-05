@@ -391,7 +391,7 @@ private:
 
     void InitializePowerSaveTimer() {
         // 保留 Wi-Fi / WSS 会话；该设备只进入低亮度省电模式，绝不由空闲计时器断电。
-        power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
+        power_save_timer_ = new PowerSaveTimer(-1, GetAutoSleepMinutes() * 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
             EnterSuperPowerSave();
         });
@@ -646,6 +646,24 @@ public:
 
     virtual Backlight* GetBacklight() override {
         return backlight_;
+    }
+
+    virtual bool SetAutoSleepMinutes(int minutes) override {
+        if (power_save_timer_ == nullptr ||
+            (minutes != 1 && minutes != 5 && minutes != 15 && minutes != 30)) {
+            return false;
+        }
+        Settings settings("power", true);
+        settings.SetInt("auto_sleep", minutes);
+        power_save_timer_->SetSleepTimeout(minutes * 60);
+        ESP_LOGI(TAG, "PWR: auto sleep set to %d minutes", minutes);
+        return true;
+    }
+
+    virtual int GetAutoSleepMinutes() override {
+        Settings settings("power", false);
+        const int minutes = settings.GetInt("auto_sleep", 1);
+        return (minutes == 1 || minutes == 5 || minutes == 15 || minutes == 30) ? minutes : 1;
     }
 
     virtual bool GetBatteryLevel(int &level, bool &charging, bool &discharging) override {
