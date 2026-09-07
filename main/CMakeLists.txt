@@ -324,6 +324,7 @@ elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75)
     set(MANUFACTURER "waveshare")
     set(BOARD_TYPE "esp32-s3-touch-amoled-1.75")
     set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
+    set(BUILTIN_ASSET_TEXT_FONT "${CMAKE_CURRENT_SOURCE_DIR}/assets/font_puhui_30_4_y.bin")
     set(BUILTIN_ICON_FONT font_awesome_30_4)
     set(DEFAULT_ASSETS_EXTRA_FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-amoled-1.75/assets/cbin")
@@ -331,6 +332,7 @@ elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75C)
     set(MANUFACTURER "waveshare")
     set(BOARD_TYPE "esp32-s3-touch-amoled-1.75")
     set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
+    set(BUILTIN_ASSET_TEXT_FONT "${CMAKE_CURRENT_SOURCE_DIR}/assets/font_puhui_30_4_y.bin")
     set(BUILTIN_ICON_FONT font_awesome_30_4)
     set(DEFAULT_ASSETS_EXTRA_FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-amoled-1.75/assets/cbin")
@@ -1015,7 +1017,9 @@ function(build_default_assets_bin)
     )
     
     # Add builtin text font if defined
-    if(BUILTIN_TEXT_FONT)
+    if(BUILTIN_ASSET_TEXT_FONT)
+        list(APPEND BUILD_ARGS "--builtin_text_font" "${BUILTIN_ASSET_TEXT_FONT}")
+    elseif(BUILTIN_TEXT_FONT)
         list(APPEND BUILD_ARGS "--builtin_text_font" "${BUILTIN_TEXT_FONT}")
     endif()
     

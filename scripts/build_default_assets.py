@@ -688,12 +688,19 @@ def get_text_font_path(builtin_text_font, xiaozhi_fonts_path):
     Get the text font path if needed
     Returns the font file path or None if no font is needed
     """
-    if not builtin_text_font or 'basic' not in builtin_text_font:
+    if not builtin_text_font:
         return None
+
+    if os.path.isabs(builtin_text_font) and os.path.exists(builtin_text_font):
+        return builtin_text_font
     
     # Convert from basic to common font name
     # e.g., font_puhui_basic_16_4 -> font_puhui_common_16_4.bin
-    if builtin_text_font.startswith('font_noto_'):
+    if builtin_text_font.endswith('.bin'):
+        font_name = os.path.basename(builtin_text_font)
+    elif 'basic' not in builtin_text_font:
+        return None
+    elif builtin_text_font.startswith('font_noto_'):
         font_name = builtin_text_font.replace('basic', 'qwen') + '.bin'
     else:
         font_name = builtin_text_font.replace('basic', 'common') + '.bin'
