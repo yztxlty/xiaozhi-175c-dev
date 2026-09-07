@@ -34,6 +34,10 @@
 main/boards/waveshare/esp32-s3-touch-amoled-1.75/
 ~~~
 
+32MB Flash 分区规划、无砖迁移、回滚和真机验收方法参见：
+
+- [ESP32-S3 32MB Flash 存储分区调整与安全迁移指南](docs/ESP32-S3_32MB_Flash存储分区调整与安全迁移指南.md)
+
 上游工程仍保留其他 ESP32-C3、ESP32-S3、ESP32-P4 等板卡的通用支持，但本仓库的默认定制目标是上述 1.75C 开发板。
 
 ## 开发环境
