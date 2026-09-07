@@ -29,6 +29,8 @@
 #endif
 
 static const char *TAG = "WifiBoard";
+static constexpr char kPairingSettingsNamespace[] = "wifi";
+static constexpr char kPairingRebootPendingKey[] = "pairing_reboot_pending";
 
 // Connection timeout in seconds
 static constexpr int CONNECT_TIMEOUT_SEC = 60;
@@ -103,6 +105,16 @@ void WifiBoard::StartNetwork() {
                 break;
         }
     });
+
+    // BLE and an already-created AFE conversation compete for the ESP32-S3's
+    // internal SRAM. Pairing reboots before the AFE is created.
+    Settings pairing(kPairingSettingsNamespace, true);
+    if (pairing.GetBool(kPairingRebootPendingKey)) {
+        pairing.SetBool(kPairingRebootPendingKey, false);
+        ESP_LOGI(TAG, "Starting requested BLE pairing before Wi-Fi conversation startup");
+        StartWifiConfigMode();
+        return;
+    }
 
     // Try to connect or enter config mode
     TryWifiConnect();
@@ -254,8 +266,10 @@ void WifiBoard::EnterWifiConfigMode() {
     }
 
     if (WifiManager::GetInstance().IsConnected()) {
-        ESP_LOGI(TAG, "Wi-Fi already connected, keep station and start BLE pairing");
-        StartWifiConfigMode();
+        ESP_LOGI(TAG, "Restarting into BLE pairing before active audio reserves SRAM");
+        Settings pairing(kPairingSettingsNamespace, true);
+        pairing.SetBool(kPairingRebootPendingKey, true);
+        Application::GetInstance().Reboot();
         return;
     }
 
@@ -286,12 +300,7 @@ void WifiBoard::EnterWifiConfigMode() {
 
 void WifiBoard::EnterWifiConfigModeForVoice() {
     ESP_LOGI(TAG, "EnterWifiConfigModeForVoice called");
-    GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
-    if (IsInWifiConfigMode()) {
-        ESP_LOGI(TAG, "already in wifi config mode");
-        return;
-    }
-    StartWifiConfigMode();
+    EnterWifiConfigMode();
 }
 
 void WifiBoard::ExitWifiConfigMode() {

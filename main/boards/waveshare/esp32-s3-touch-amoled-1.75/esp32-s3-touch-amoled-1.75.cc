@@ -20,6 +20,7 @@
 #include <driver/spi_master.h>
 #include "esp_io_expander_tca9554.h"
 #include "settings.h"
+#include "assets/source_arrays/ygsoul_boot_lvgl.h"
 
 #include <esp_lcd_touch_cst9217.h>
 #include <esp_lvgl_port.h>
@@ -109,6 +110,7 @@ private:
     std::array<std::unique_ptr<LvglImage>, YGSOUL_MOUTH_FRAME_COUNT> ygsoul_mouth_frames_;
     lv_obj_t* ygsoul_image_ = nullptr;
     lv_obj_t* ygsoul_mouth_image_ = nullptr;
+    lv_obj_t* ygsoul_boot_image_ = nullptr;
     lv_timer_t* ygsoul_mouth_timer_ = nullptr;
     uint8_t ygsoul_mouth_frame_ = YGSOUL_MOUTH_CLOSED;
 
@@ -287,6 +289,7 @@ private:
         lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ygsoul_boot_image_, LV_OBJ_FLAG_HIDDEN);
         if (!ygsoul_mouth_speaking_) {
             SetYGSoulMouthFrame(YGSOUL_MOUTH_CLOSED);
         }
@@ -295,7 +298,7 @@ private:
     }
 
     void ShowYGSoulBootLogo() {
-        if (ygsoul_image_ == nullptr || emoji_box_ == nullptr) {
+        if (ygsoul_boot_image_ == nullptr || emoji_box_ == nullptr) {
             return;
         }
 
@@ -304,9 +307,9 @@ private:
         lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(ygsoul_boot_image_, LV_OBJ_FLAG_HIDDEN);
         RaiseYGSoulChrome();
         ApplyYGSoulOverlayStyle();
     }
@@ -369,6 +372,9 @@ public:
             ygsoul_mouth_image_, ygsoul_image_, LV_ALIGN_TOP_LEFT,
             YGSOUL_MOUTH_X, YGSOUL_MOUTH_Y);
         lv_obj_add_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
+        ygsoul_boot_image_ = lv_image_create(lv_screen_active());
+        lv_image_set_src(ygsoul_boot_image_, &ygsoul_boot_lvgl);
+        lv_obj_center(ygsoul_boot_image_);
         ShowYGSoulBootLogo();
         lv_display_add_event_cb(display_, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
     }

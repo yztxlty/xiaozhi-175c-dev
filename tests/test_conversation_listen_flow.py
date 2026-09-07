@@ -150,7 +150,7 @@ def test_audio_backpressure_drops_stale_input_without_blocking_afe():
     assert "audio_queue_cv_.wait(" not in push
 
 
-def test_pairing_entry_keeps_the_existing_wifi_session():
+def test_pairing_entry_restarts_before_ble_needs_active_audio_memory():
     app = _read("main/application.cc")
     wifi = _read("main/boards/common/wifi_board.cc")
     command = _slice(app, "bool Application::HandleWifiConfigVoiceCommand(", "void Application::SpeakPrompt(")
@@ -158,11 +158,10 @@ def test_pairing_entry_keeps_the_existing_wifi_session():
     button_entry = _slice(wifi, "void WifiBoard::EnterWifiConfigMode()", "void WifiBoard::EnterWifiConfigModeForVoice()")
 
     assert "EnterWifiConfigMode();" in command
-    assert "WifiManager::GetInstance().StopStation();" not in voice_entry
-    assert "StartWifiConfigMode();" in voice_entry
+    assert "EnterWifiConfigMode();" in voice_entry
     assert "WifiManager::GetInstance().IsConnected()" in button_entry
-    assert "keep station and start BLE pairing" in button_entry
-    assert "WifiManager::GetInstance().StopStation();" not in button_entry
+    assert "SetBool(kPairingRebootPendingKey, true)" in button_entry
+    assert "Application::GetInstance().Reboot();" in button_entry
 
 
 def test_pairing_can_preempt_an_active_conversation_and_switch_to_logo():
@@ -183,8 +182,23 @@ def test_pairing_can_preempt_an_active_conversation_and_switch_to_logo():
     assert "YgSoulBleProvisioning::GetInstance().Start()" in start
     assert "kDeviceStateWifiConfiguring" in emotion
     assert "ShowYGSoulBootLogo();" in emotion
+    assert "ygsoul_boot_image_" in display
+    assert "ygsoul_boot_lvgl" in display
     assert "Voice command: enter wifi config" in app
     assert "ESP_ERROR_CHECK(esp_bt_controller_mem_release" not in ble
+
+
+def test_pairing_reboots_before_ble_when_conversation_memory_is_active():
+    wifi = _read("main/boards/common/wifi_board.cc")
+    start_network = _slice(wifi, "void WifiBoard::StartNetwork()", "void WifiBoard::TryWifiConnect()")
+    enter = _slice(wifi, "void WifiBoard::EnterWifiConfigMode()", "void WifiBoard::EnterWifiConfigModeForVoice()")
+    voice = _slice(wifi, "void WifiBoard::EnterWifiConfigModeForVoice()", "void WifiBoard::ExitWifiConfigMode()")
+
+    assert "GetBool(kPairingRebootPendingKey)" in start_network
+    assert "StartWifiConfigMode();" in start_network
+    assert "SetBool(kPairingRebootPendingKey, true)" in enter
+    assert "Application::GetInstance().Reboot();" in enter
+    assert "EnterWifiConfigMode();" in voice
 
 
 def test_pairing_completion_returns_to_standby_without_rebooting():
@@ -222,8 +236,9 @@ if __name__ == "__main__":
     test_wake_words_are_youguang_not_xiaozhi()
     test_protocol_can_request_exact_tts_prompt()
     test_audio_backpressure_drops_stale_input_without_blocking_afe()
-    test_pairing_entry_keeps_the_existing_wifi_session()
+    test_pairing_entry_restarts_before_ble_needs_active_audio_memory()
     test_pairing_can_preempt_an_active_conversation_and_switch_to_logo()
+    test_pairing_reboots_before_ble_when_conversation_memory_is_active()
     test_pairing_completion_returns_to_standby_without_rebooting()
     test_pairing_starts_ble_after_conversation_audio_is_released()
     print("PASS: conversation listen flow")
