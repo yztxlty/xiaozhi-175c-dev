@@ -106,11 +106,9 @@ private:
     bool ygsoul_chat_message_is_system_ = true;
     bool ygsoul_assets_ready_ = false;
     std::unique_ptr<LvglImage> ygsoul_companion_;
-    std::unique_ptr<LvglImage> ygsoul_boot_;
     std::array<std::unique_ptr<LvglImage>, YGSOUL_MOUTH_FRAME_COUNT> ygsoul_mouth_frames_;
     lv_obj_t* ygsoul_image_ = nullptr;
     lv_obj_t* ygsoul_mouth_image_ = nullptr;
-    lv_obj_t* ygsoul_boot_image_ = nullptr;
     lv_timer_t* ygsoul_mouth_timer_ = nullptr;
     uint8_t ygsoul_mouth_frame_ = YGSOUL_MOUTH_CLOSED;
 
@@ -170,18 +168,16 @@ private:
     }
 
     bool LoadYGSoulAssets() {
-        auto boot = LoadYGSoulAsset("ygsoul_boot.cbin");
         auto companion = LoadYGSoulAsset("ygsoul_companion_nomouth.cbin");
         std::array<std::unique_ptr<LvglImage>, YGSOUL_MOUTH_FRAME_COUNT> mouths;
         mouths[0] = LoadYGSoulAsset("ygsoul_mouth_1.cbin");
         mouths[1] = LoadYGSoulAsset("ygsoul_mouth_2.cbin");
         mouths[2] = LoadYGSoulAsset("ygsoul_mouth_3.cbin");
-        if (boot == nullptr || companion == nullptr ||
+        if (companion == nullptr ||
             mouths[0] == nullptr || mouths[1] == nullptr || mouths[2] == nullptr) {
             ESP_LOGE(TAG, "YGSoul assets are incomplete; using the lightweight display fallback");
             return false;
         }
-        ygsoul_boot_ = std::move(boot);
         ygsoul_companion_ = std::move(companion);
         ygsoul_mouth_frames_ = std::move(mouths);
         ygsoul_assets_ready_ = true;
@@ -291,7 +287,6 @@ private:
         lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(ygsoul_boot_image_, LV_OBJ_FLAG_HIDDEN);
         if (!ygsoul_mouth_speaking_) {
             SetYGSoulMouthFrame(YGSOUL_MOUTH_CLOSED);
         }
@@ -300,7 +295,7 @@ private:
     }
 
     void ShowYGSoulBootLogo() {
-        if (ygsoul_boot_image_ == nullptr || emoji_box_ == nullptr) {
+        if (ygsoul_image_ == nullptr || emoji_box_ == nullptr) {
             return;
         }
 
@@ -309,9 +304,9 @@ private:
         lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(ygsoul_boot_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
         RaiseYGSoulChrome();
         ApplyYGSoulOverlayStyle();
     }
@@ -374,9 +369,6 @@ public:
             ygsoul_mouth_image_, ygsoul_image_, LV_ALIGN_TOP_LEFT,
             YGSOUL_MOUTH_X, YGSOUL_MOUTH_Y);
         lv_obj_add_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
-        ygsoul_boot_image_ = lv_image_create(lv_screen_active());
-        lv_image_set_src(ygsoul_boot_image_, ygsoul_boot_->image_dsc());
-        lv_obj_center(ygsoul_boot_image_);
         ShowYGSoulBootLogo();
         lv_display_add_event_cb(display_, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
     }
