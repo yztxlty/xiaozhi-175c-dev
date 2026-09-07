@@ -150,7 +150,7 @@ def test_audio_backpressure_drops_stale_input_without_blocking_afe():
     assert "audio_queue_cv_.wait(" not in push
 
 
-def test_physical_pairing_entry_stops_station_but_voice_entry_keeps_wifi():
+def test_pairing_entry_keeps_the_existing_wifi_session():
     app = _read("main/application.cc")
     wifi = _read("main/boards/common/wifi_board.cc")
     command = _slice(app, "bool Application::HandleWifiConfigVoiceCommand(", "void Application::SpeakPrompt(")
@@ -161,8 +161,8 @@ def test_physical_pairing_entry_stops_station_but_voice_entry_keeps_wifi():
     assert "WifiManager::GetInstance().StopStation();" not in voice_entry
     assert "StartWifiConfigMode();" in voice_entry
     assert "WifiManager::GetInstance().IsConnected()" in button_entry
-    assert "WifiManager::GetInstance().StopStation();" in button_entry
-    assert "esp_timer_stop(connect_timer_);" in button_entry
+    assert "keep station and start BLE pairing" in button_entry
+    assert "WifiManager::GetInstance().StopStation();" not in button_entry
 
 
 def test_pairing_completion_returns_to_standby_without_rebooting():
