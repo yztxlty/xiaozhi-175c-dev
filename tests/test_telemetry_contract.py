@@ -121,6 +121,17 @@ def test_clear_storage_erases_transient_flash_without_touching_valid_pack():
     assert 'Assets::GetInstance().PurgeTransient()' in application
 
 
+def test_active_role_command_persists_and_reports_role_and_voice_ids():
+    application = (ROOT / "main/application.cc").read_text()
+    status = (ROOT / "main/boards/common/wifi_board.cc").read_text()
+
+    assert 'strcmp(command->valuestring, "setActiveRole") == 0' in application
+    assert 'companion.SetString("active_role"' in application
+    assert 'companion.SetString("voice_profile"' in application
+    assert 'cJSON_AddStringToObject(root, "activeRoleId"' in status
+    assert 'cJSON_AddStringToObject(root, "voiceProfileId"' in status
+
+
 def test_device_attributes_expose_real_identity_and_firmware_metadata():
     status = (ROOT / "main/boards/common/wifi_board.cc").read_text()
 

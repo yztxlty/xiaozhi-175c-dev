@@ -738,6 +738,20 @@ void Application::HandleCustomMessage(const cJSON* root) {
         } else {
             error_code = "invalid_params";
         }
+    } else if (strcmp(command->valuestring, "setActiveRole") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        auto role_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "roleId") : nullptr;
+        auto voice_profile_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "voiceProfileId") : nullptr;
+        if (cJSON_IsString(role_id) && role_id->valuestring[0] != '\0'
+                && cJSON_IsString(voice_profile_id) && voice_profile_id->valuestring[0] != '\0') {
+            Settings companion("companion", true);
+            companion.SetString("active_role", role_id->valuestring);
+            companion.SetString("voice_profile", voice_profile_id->valuestring);
+            succeeded = true;
+            command_changes_telemetry = true;
+        } else {
+            error_code = "invalid_params";
+        }
     } else if (strcmp(command->valuestring, "reportStatus") == 0) {
         succeeded = true;
     } else if (strcmp(command->valuestring, "checkOta") == 0) {

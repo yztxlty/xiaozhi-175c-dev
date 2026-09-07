@@ -385,6 +385,16 @@ std::string WifiBoard::GetDeviceStatusJson() {
     cJSON_AddStringToObject(root, "hardwareVersion", BOARD_NAME);
     cJSON_AddStringToObject(root, "firmwareVersion", esp_app_get_description()->version);
 
+    Settings companion("companion", false);
+    auto active_role_id = companion.GetString("active_role");
+    auto voice_profile_id = companion.GetString("voice_profile");
+    if (!active_role_id.empty()) {
+        cJSON_AddStringToObject(root, "activeRoleId", active_role_id.c_str());
+    }
+    if (!voice_profile_id.empty()) {
+        cJSON_AddStringToObject(root, "voiceProfileId", voice_profile_id.c_str());
+    }
+
     // Audio speaker
     auto audio_speaker = cJSON_CreateObject();
     if (auto codec = board.GetAudioCodec()) {
