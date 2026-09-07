@@ -245,7 +245,11 @@ void WifiBoard::EnterWifiConfigMode() {
     }
 
     if (WifiManager::GetInstance().IsConnected()) {
-        ESP_LOGI(TAG, "Wi-Fi already connected, keep station and start BLE pairing");
+        ESP_LOGI(TAG, "Wi-Fi already connected, stop station before BLE pairing");
+        WifiManager::GetInstance().StopStation();
+        // StopStation emits Disconnected and arms recovery; pairing must own
+        // the station until the user supplies new Wi-Fi credentials.
+        esp_timer_stop(connect_timer_);
         StartWifiConfigMode();
         return;
     }
