@@ -19,7 +19,12 @@ grep -q "ygsoul_speaking_mouth_lvgl.h" "$board_file"
 grep -q "ygsoul_boot_" "$board_file"
 ! grep -q "SetCharacterOpacity" "$board_file"
 grep -q "virtual void SetStatus" "$board_file"
+grep -q "case kDeviceStateWifiConfiguring:[[:space:]]*$" main/application.cc
+grep -A2 -q "case kDeviceStateWifiConfiguring:" main/application.cc
+grep -A2 -q "display->SetStatus(Lang::Strings::WIFI_CONFIG_MODE);" main/application.cc
 grep -q "showing_boot_logo_" "$board_file"
+grep -q "conversation_ui" "$board_file"
+grep -q "kDeviceStateListening" "$board_file"
 grep -q "ApplyYGSoulOverlayStyle" "$board_file"
 grep -q "ApplyYGSoulChatMessageColor" "$board_file"
 grep -q "lv_color_hex(YGSOUL_UI_TEXT)" "$board_file"

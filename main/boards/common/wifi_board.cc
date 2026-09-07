@@ -376,8 +376,11 @@ std::string WifiBoard::GetDeviceStatusJson() {
 
     // Screen
     auto screen = cJSON_CreateObject();
-    if (auto backlight = board.GetBacklight()) {
-        cJSON_AddNumberToObject(screen, "brightness", backlight->brightness());
+    if (board.GetBacklight() != nullptr) {
+        // The panel fades asynchronously. Report the persisted user setting, not
+        // a transient brightness value sampled during the fade or power-save dim.
+        Settings settings("display", false);
+        cJSON_AddNumberToObject(screen, "brightness", settings.GetInt("brightness", 75));
     }
     if (auto display = board.GetDisplay(); display && display->height() > 64) {
         if (auto theme = display->GetTheme()) {

@@ -158,6 +158,7 @@ void YgSoulBleProvisioning::EnsureAdvertising() {
 }
 
 void YgSoulBleProvisioning::Stop() {
+    pairing_receipt_.CancelPending();
     if (!started_) return;
     if (wifi_connect_timeout_ != nullptr) {
         esp_timer_stop(wifi_connect_timeout_);
@@ -172,7 +173,7 @@ void YgSoulBleProvisioning::Stop() {
     esp_bt_controller_deinit();
     delete parser_;
     parser_ = nullptr;
-    started_ = connected_ = netcfg_started_ = waiting_for_wifi_ = false;
+    started_ = connected_ = netcfg_started_ = false;
     candidate_saved_ = false;
     previous_ssids_.clear();
     gatts_if_ = ESP_GATT_IF_NONE;
@@ -308,6 +309,7 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
         SendStatus("FAILED", "INVALID_WIFI");
         return;
     }
+    pairing_receipt_.Begin(token, ssid);
     netcfg_started_ = true;
     if (!candidate_saved_) {
         previous_ssids_ = SsidManager::GetInstance().GetSsidList();
@@ -316,7 +318,7 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
     SsidManager::GetInstance().AddSsid(ssid.c_str(), password.c_str());
     ESP_LOGI(kTag, "WiFi credentials saved; starting station");
     WifiManager::GetInstance().StopStation();
-    waiting_for_wifi_ = true;
+    pairing_receipt_.StartWaiting();
     if (wifi_connect_timeout_ == nullptr) {
         const esp_timer_create_args_t timer_args = {
             .callback = &YgSoulBleProvisioning::OnWifiConnectTimeout,
@@ -354,10 +356,14 @@ void YgSoulBleProvisioning::SendStatus(const char* status, const char* code) {
     cJSON_Delete(json);
 }
 
-void YgSoulBleProvisioning::OnNetworkEvent(NetworkEvent event, const std::string&) {
-    if (!netcfg_started_) return;
+void YgSoulBleProvisioning::OnNetworkEvent(NetworkEvent event, const std::string& data) {
     if (event == NetworkEvent::Connected) {
-        waiting_for_wifi_ = false;
+        const auto result = pairing_receipt_.Complete(data);
+        if (result == ygsoul::ble::PairingReceipt::Result::Ignored) return;
+        if (result == ygsoul::ble::PairingReceipt::Result::Mismatch) {
+            FailProvisioning("WIFI_SSID_MISMATCH");
+            return;
+        }
         if (wifi_connect_timeout_ != nullptr) esp_timer_stop(wifi_connect_timeout_);
         candidate_saved_ = false;
         previous_ssids_.clear();
@@ -371,13 +377,13 @@ void YgSoulBleProvisioning::OnNetworkEvent(NetworkEvent event, const std::string
 
 void YgSoulBleProvisioning::OnWifiConnectTimeout(void* arg) {
     auto* service = static_cast<YgSoulBleProvisioning*>(arg);
-    if (service->waiting_for_wifi_) {
+    if (service->pairing_receipt_.CancelPending()) {
         service->FailProvisioning("WIFI_CONNECT_TIMEOUT");
     }
 }
 
 void YgSoulBleProvisioning::FailProvisioning(const char* code) {
-    waiting_for_wifi_ = false;
+    pairing_receipt_.CancelPending();
     if (wifi_connect_timeout_ != nullptr) esp_timer_stop(wifi_connect_timeout_);
     WifiManager::GetInstance().StopStation();
     if (candidate_saved_) {

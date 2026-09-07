@@ -3,6 +3,7 @@
 #include "system_info.h"
 #include "assets.h"
 
+#include <algorithm>
 #include <esp_log.h>
 #include <esp_mn_iface.h>
 #include <esp_mn_models.h>
@@ -98,6 +99,15 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
         ParseWakenetModelConfig();
     }
 
+    const bool has_youguang = std::any_of(commands_.begin(), commands_.end(), [](const Command& item) {
+        return item.text == "你好幽光" || item.text == "你好小幽" || item.text == "小幽小幽";
+    });
+    if (!has_youguang) {
+        commands_.push_back({"ni hao you guang", "你好幽光", "wake"});
+        commands_.push_back({"ni hao xiao you", "你好小幽", "wake"});
+        commands_.push_back({"xiao you xiao you", "小幽小幽", "wake"});
+    }
+
     if (models_ == nullptr || models_->num == -1) {
         ESP_LOGE(TAG, "Failed to initialize wakenet model");
         return false;
@@ -176,7 +186,7 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
                 ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f", 
                         mn_result->command_id[i], mn_result->string, mn_result->prob[i]);
                 auto& command = commands_[mn_result->command_id[i] - 1];
-                if (command.action == "wake") {
+                if (command.action == "wake" || command.action == "dismiss") {
                     last_detected_wake_word_ = command.text;
                     running_ = false;
                     input_buffer_.clear();

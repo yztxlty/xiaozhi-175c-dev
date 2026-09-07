@@ -60,6 +60,7 @@ void McpServer::AddCommonTools() {
         [&board](const PropertyList& properties) -> ReturnValue {
             auto codec = board.GetAudioCodec();
             codec->SetOutputVolume(properties["volume"].value<int>());
+            Application::GetInstance().ReportDeviceTelemetry();
             return true;
         });
     
@@ -73,6 +74,7 @@ void McpServer::AddCommonTools() {
             [backlight](const PropertyList& properties) -> ReturnValue {
                 uint8_t brightness = static_cast<uint8_t>(properties["brightness"].value<int>());
                 backlight->SetBrightness(brightness, true);
+                Application::GetInstance().ReportDeviceTelemetry();
                 return true;
             });
     }

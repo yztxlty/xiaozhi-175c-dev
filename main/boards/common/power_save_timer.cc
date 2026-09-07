@@ -130,3 +130,8 @@ void PowerSaveTimer::WakeUp() {
         }
     }
 }
+
+void PowerSaveTimer::SetSleepTimeout(int seconds) {
+    seconds_to_sleep_ = seconds;
+    WakeUp();
+}

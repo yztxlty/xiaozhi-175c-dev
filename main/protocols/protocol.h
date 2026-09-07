@@ -71,8 +71,10 @@ public:
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
     virtual void SendStopListening();
+    virtual void SendSpeakRequest(const std::string& text);
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    bool SendDeviceMessage(const std::string& message);
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;
@@ -95,4 +97,3 @@ protected:
 };
 
 #endif // PROTOCOL_H
-

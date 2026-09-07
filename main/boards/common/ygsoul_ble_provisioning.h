@@ -18,6 +18,7 @@ public:
     void Stop();
     void EnsureAdvertising();
     void OnNetworkEvent(NetworkEvent event, const std::string& data);
+    std::string GetPairingSessionId() const { return pairing_receipt_.SessionId(); }
 
 private:
     static void GattsEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
@@ -36,7 +37,7 @@ private:
     esp_gatt_if_t gatts_if_ = ESP_GATT_IF_NONE;
     uint16_t connection_id_ = 0;
     uint16_t notify_handle_ = 0;
-    bool waiting_for_wifi_ = false;
+    ygsoul::ble::PairingReceipt pairing_receipt_;
     bool candidate_saved_ = false;
     std::vector<SsidItem> previous_ssids_;
     esp_timer_handle_t wifi_connect_timeout_ = nullptr;

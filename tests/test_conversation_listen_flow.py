@@ -35,51 +35,84 @@ def test_initialize_protocol_reuses_existing_clients():
     assert "if (management_client_ == nullptr)" in init or "if (!management_client_)" in init
 
 
-def test_pairing_wifi_change_restarts_protocol_when_chat_session_was_reset():
+def test_conversation_states_switch_off_boot_logo_to_companion():
+    emotion = _slice(
+        _read("main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc"),
+        "virtual void SetEmotion(const char* emotion) override",
+        "virtual void SetStatus(const char* status) override",
+    )
+    assert "kDeviceStateConnecting" in emotion
+    assert "kDeviceStateListening" in emotion
+    assert "kDeviceStateSpeaking" in emotion
+    assert "ShowYGSoulCompanion" in emotion
+    assert "showing_boot_logo_ && !conversation_ui" in emotion
+
+
+def test_pairing_wifi_up_stays_in_config_until_exit():
     connected = _slice(
         _read("main/application.cc"),
         "void Application::HandleNetworkConnectedEvent()",
         "void Application::HandleNetworkDisconnectedEvent()",
     )
-    listen = _slice(
-        _read("main/application.cc"),
-        "void Application::EnterConversationListening(",
-        "void Application::EnterVoiceDismissed()",
-    )
-
-    assert "management_client_ != nullptr && protocol_ != nullptr" in connected
+    assert "wait for 结束配网" in connected
     assert "StartActivationIfNeeded" in connected
-    assert "protocol_ == nullptr" in listen
-    assert "StartActivationIfNeeded" in listen
-    assert "stay connecting" not in listen
+    assert "EnterConversationListening" not in connected
 
 
-def test_network_ready_enters_listening_not_standby():
+def test_activation_and_pairing_exit_enter_standby():
     source = _read("main/application.cc")
-    connected = _slice(source, "void Application::HandleNetworkConnectedEvent()", "void Application::HandleNetworkDisconnectedEvent()")
     done = _slice(source, "void Application::HandleActivationDoneEvent()", "void Application::ActivationTask()")
-    machine = _read("main/device_state_machine.cc")
-    starting = _slice(machine, "case kDeviceStateStarting:", "case kDeviceStateWifiConfiguring:")
-
-    assert "kDeviceStateIdle" not in connected
-    assert "kDeviceStateConnecting" in connected
-    assert "kDeviceStateIdle" not in done
-    assert "EnterConversationListening(" in done
-    assert "我已联网，现在可以对话啦" in done
-    assert "kDeviceStateConnecting" in starting
-    assert "LOW_POWER" not in done
+    standby = _slice(source, "void Application::EnterStandby()", "void Application::EnterVoiceDismissed()")
+    assert "EnterStandby" in done
+    assert "EnterConversationListening" not in done
+    assert "CRITICAL-RUNTIME-CONTRACT" in standby
+    assert "SendStopListening" in standby
+    assert "CloseAudioChannel" not in standby
+    assert "EnableWakeWordDetection(true)" in standby
 
 
-def test_dismiss_commands_enter_low_power_and_button_resumes_listening():
+def test_super_power_save_never_tears_down_the_websocket():
+    board = _read("main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc")
+    super_save = _slice(board, "void EnterSuperPowerSave()", "void ExitSuperPowerSave()")
+    assert "CRITICAL-RUNTIME-CONTRACT" in super_save
+    assert "CloseAudioChannel" not in super_save
+
+
+def test_dismiss_commands_finish_tts_before_standby_and_wake_clears_dismissal():
     source = _read("main/application.cc")
     assert "IsVoiceDismissCommand(" in source
     assert '"退下"' in source
     assert '"关机"' in source
-    assert "EnterVoiceDismissed(" in source
-    assert "在呢，可以正常实时拾音对话" in source
+    dismissed = _slice(source, "void Application::EnterVoiceDismissed()", "void Application::ListenForPairingCommand()")
+    tts_stop = _slice(source, 'strcmp(state->valuestring, "stop")', 'strcmp(state->valuestring, "sentence_start")')
+    assert "voice_dismissed_ = true" in dismissed
+    assert "EnterStandby();" not in dismissed
+    assert "voice_dismissed_" in tts_stop
+    assert "EnterStandby" in tts_stop
     toggle = _slice(source, "void Application::HandleToggleChatEvent()", "void Application::ContinueOpenAudioChannel")
-    assert "voice_dismissed_" in toggle
-    assert "EnterConversationListening(" in toggle
+    assert "BOOT starts conversation from standby" in toggle
+    assert "EnterConversationListening" in toggle
+    assert "kDeviceStateListening" in toggle
+    assert "EnterStandby" in toggle
+    wake = _slice(source, "void Application::HandleWakeWordDetectedEvent()", "void Application::ContinueWakeWordInvoke")
+    assert "CRITICAL-RUNTIME-CONTRACT" in wake
+    assert "ContinueWakeWordInvoke" in wake
+    assert "voice_dismissed_ = false" in wake
+    assert "SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE)" in wake
+
+
+def test_dismissal_acknowledgement_tts_must_start_before_it_can_finish_to_standby():
+    source = _read("main/application.cc")
+    incoming = _slice(source, "protocol_->OnIncomingJson(", "protocol_->Start();")
+    tts_start = _slice(incoming, 'if (strcmp(state->valuestring, "start") == 0)', 'else if (strcmp(state->valuestring, "stop") == 0)')
+    assert "SetDeviceState(kDeviceStateSpeaking);" in tts_start
+    assert "if (voice_dismissed_)" not in tts_start
+
+
+def test_explicit_cloud_standby_does_not_wait_for_a_tts_event():
+    source = _read("main/application.cc")
+    standby_event = _slice(source, 'strcmp(type->valuestring, "device.standby")', 'strcmp(type->valuestring, "llm")')
+    assert "EnterStandby();" in standby_event
 
 
 def test_wake_words_are_youguang_not_xiaozhi():
@@ -97,7 +130,7 @@ def test_wake_words_are_youguang_not_xiaozhi():
     assert "NIHAOXIAOZHI" not in defaults
     assert "CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y" not in sdkconfig
     assert "你好小智" not in custom
-    assert "我已联网，现在可以对话啦" in _read("main/application.cc")
+    assert "你好小智" not in lang
 
 
 def test_protocol_can_request_exact_tts_prompt():
@@ -108,10 +141,65 @@ def test_protocol_can_request_exact_tts_prompt():
     assert "request" in protocol
 
 
+def test_audio_backpressure_drops_stale_input_without_blocking_afe():
+    source = _read("main/audio/audio_service.cc")
+    push = _slice(source, "void AudioService::PushTaskToEncodeQueue(", "bool AudioService::PushPacketToDecodeQueue(")
+
+    assert "audio_encode_queue_.size() >= MAX_ENCODE_TASKS_IN_QUEUE" in push
+    assert "dropping stale audio frame" in push
+    assert "audio_queue_cv_.wait(" not in push
+
+
+def test_pairing_entry_keeps_the_last_known_good_wifi_state():
+    app = _read("main/application.cc")
+    wifi = _read("main/boards/common/wifi_board.cc")
+    command = _slice(app, "bool Application::HandleWifiConfigVoiceCommand(", "void Application::SpeakPrompt(")
+    voice_entry = _slice(wifi, "void WifiBoard::EnterWifiConfigModeForVoice()", "void WifiBoard::ExitWifiConfigMode(")
+    button_entry = _slice(wifi, "void WifiBoard::EnterWifiConfigMode()", "void WifiBoard::EnterWifiConfigModeForVoice()")
+
+    assert "EnterWifiConfigMode();" in command
+    assert "WifiManager::GetInstance().StopStation();" not in voice_entry
+    assert "StartWifiConfigMode();" in voice_entry
+    assert "WifiManager::GetInstance().IsConnected()" in button_entry
+    assert "keep station and start BLE pairing" in button_entry
+
+
+def test_pairing_completion_returns_to_standby_without_rebooting():
+    wifi = _read("main/boards/common/wifi_board.cc")
+    ble = _read("main/boards/common/ygsoul_ble_provisioning.cc")
+    exit_mode = _slice(wifi, "void WifiBoard::ExitWifiConfigMode", "bool WifiBoard::IsInWifiConfigMode")
+    connected = _slice(ble, "void YgSoulBleProvisioning::OnNetworkEvent", "void YgSoulBleProvisioning::OnWifiConnectTimeout")
+
+    assert "ExitWifiConfigMode();" in connected
+    assert "Settings websocket_settings" not in exit_mode
+    assert "Application::GetInstance().Reboot();" not in exit_mode
+    assert "Application::GetInstance().EnterStandby();" in exit_mode
+
+
+def test_pairing_starts_ble_in_the_original_synchronous_path():
+    app = _read("main/application.cc")
+    wifi = _read("main/boards/common/wifi_board.cc")
+    start = _slice(wifi, "void WifiBoard::StartWifiConfigMode()", "void WifiBoard::EnterWifiConfigMode()")
+    ble_start = _slice(start, "#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING", "#elif CONFIG_USE_HOTSPOT_WIFI_PROVISIONING")
+    state_changed = _slice(app, "case kDeviceStateWifiConfiguring:", "default:")
+
+    assert "YgSoulBleProvisioning::GetInstance().Start()" in ble_start
+    assert "Application::GetInstance().Schedule" not in ble_start
+    assert "EnableVoiceProcessing(false);" in state_changed
+    assert "EnableWakeWordDetection(true);" in state_changed
+
+
 if __name__ == "__main__":
-    test_pairing_wifi_change_restarts_protocol_when_chat_session_was_reset()
-    test_network_ready_enters_listening_not_standby()
-    test_dismiss_commands_enter_low_power_and_button_resumes_listening()
+    test_conversation_states_switch_off_boot_logo_to_companion()
+    test_pairing_wifi_up_stays_in_config_until_exit()
+    test_activation_and_pairing_exit_enter_standby()
+    test_super_power_save_never_tears_down_the_websocket()
+    test_dismiss_commands_finish_tts_before_standby_and_wake_clears_dismissal()
+    test_dismissal_acknowledgement_tts_must_start_before_it_can_finish_to_standby()
     test_wake_words_are_youguang_not_xiaozhi()
     test_protocol_can_request_exact_tts_prompt()
+    test_audio_backpressure_drops_stale_input_without_blocking_afe()
+    test_pairing_entry_keeps_the_last_known_good_wifi_state()
+    test_pairing_completion_returns_to_standby_without_rebooting()
+    test_pairing_starts_ble_in_the_original_synchronous_path()
     print("PASS: conversation listen flow")

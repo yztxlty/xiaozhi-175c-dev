@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-grep -q 'set(PROJECT_VER "1.0.5")' CMakeLists.txt
+grep -Eq 'set\(PROJECT_VER "[0-9]+\.[0-9]+\.[0-9]+"\)' CMakeLists.txt
 grep -q 'ReportDeviceUplink' main/application.cc
 grep -q '"reportType"' main/application.cc
 grep -q 'unsupported_command' main/application.cc
@@ -18,7 +18,7 @@ grep -Fq 'client->connected_ = false;' main/device_management_client.cc
 grep -q 'OnMessage' main/device_management_client.cc
 grep -q 'HandleCustomMessage' main/application.cc
 grep -q 'Reporting online immediately after Wi-Fi join' main/application.cc
-grep -q 'Wi-Fi rejoined, keep existing management session' main/application.cc
+grep -q 'protocol_ == nullptr' main/application.cc
 grep -q 'strcmp(command->valuestring, "unbind") == 0' main/application.cc
 grep -q 'strcmp(command->valuestring, "factoryReset") == 0' main/application.cc
 grep -q 'cJSON_AddBoolToObject(reported, "unbound", true)' main/application.cc

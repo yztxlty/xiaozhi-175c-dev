@@ -78,6 +78,8 @@ public:
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }
     virtual const char* GetNetworkStateIcon() = 0;
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging);
+    virtual bool SetAutoSleepMinutes(int minutes) { (void)minutes; return false; }
+    virtual int GetAutoSleepMinutes() { return -1; }
     virtual std::string GetSystemInfoJson();
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;

@@ -34,6 +34,20 @@ public:
 
     inline bool partition_valid() const { return partition_valid_; }
     inline std::string default_assets_url() const { return default_assets_url_; }
+    size_t GetFreeSpace() const {
+        if (!partition_valid_ || !partition_) {
+            return 0;
+        }
+        const size_t used = used_size_ + transient_size_;
+        return used <= partition_->size ? partition_->size - used : 0;
+    }
+    size_t GetTotalSize() const {
+        return partition_valid_ && partition_ ? partition_->size : 0;
+    }
+    size_t GetUsedSize() const {
+        return partition_valid_ ? used_size_ + transient_size_ : 0;
+    }
+    bool PurgeTransient();
 
 private:
     Assets();
@@ -42,6 +56,8 @@ private:
 
     bool InitializePartition();
     void UnApplyPartition();
+    size_t ScanTransientOccupancy(size_t keep) const;
+    static size_t AlignUp(size_t value, size_t align, size_t cap);
     static bool FindPartition(Assets* assets);
     static bool LoadSrmodelsFromIndex(Assets* assets, cJSON* root = nullptr);
   
@@ -82,6 +98,10 @@ private:
 protected:
     const esp_partition_t* partition_ = nullptr;
     bool partition_valid_ = false;
+    bool pack_layout_known_ = false;
+    bool pack_valid_ = false;
+    size_t used_size_ = 0;
+    size_t transient_size_ = 0;
     std::string default_assets_url_;
     srmodel_list_t* models_list_ = nullptr;
 };

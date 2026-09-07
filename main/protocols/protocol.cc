@@ -1,5 +1,6 @@
 #include "protocol.h"
 
+#include <cJSON.h>
 #include <esp_log.h>
 
 #define TAG "Protocol"
@@ -73,9 +74,28 @@ void Protocol::SendStopListening() {
     SendText(message);
 }
 
+void Protocol::SendSpeakRequest(const std::string& text) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
+    cJSON_AddStringToObject(root, "type", "tts");
+    cJSON_AddStringToObject(root, "state", "request");
+    cJSON_AddStringToObject(root, "text", text.c_str());
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == nullptr) {
+        return;
+    }
+    SendText(json);
+    cJSON_free(json);
+}
+
 void Protocol::SendMcpMessage(const std::string& payload) {
     std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"mcp\",\"payload\":" + payload + "}";
     SendText(message);
+}
+
+bool Protocol::SendDeviceMessage(const std::string& message) {
+    return SendText(message);
 }
 
 bool Protocol::IsTimeout() const {

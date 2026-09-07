@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XiaoZhi ESP32 / YGSoul 固件架构深度解析</title>
+<style>
+:root{--bg:#f5f7fb;--card:#fff;--ink:#172033;--muted:#5c6780;--line:#dfe5ef;--a:#4338ca;--cyan:#087f9b;--warn:#a16207;--red:#b42318;--code:#111827}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.75 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}.wrap{max-width:1400px;margin:auto;padding:28px}.hero{background:linear-gradient(135deg,#171c43,#303b9f 60%,#0e7490);color:#fff;border-radius:24px;padding:42px 48px}h1{font-size:clamp(28px,4vw,48px);line-height:1.15;margin:0 0 14px}h2{margin-top:48px;border-bottom:2px solid var(--line);padding-bottom:8px}h3{margin-top:28px;color:#28347d}.lead{font-size:18px;opacity:.93}.meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}.pill{background:#ffffff20;border:1px solid #ffffff38;border-radius:999px;padding:5px 12px;font-size:13px}.layout{display:grid;grid-template-columns:265px 1fr;gap:26px;align-items:start}.toc{position:sticky;top:18px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}.toc strong{display:block;margin-bottom:8px}.toc a{display:block;color:#35416f;text-decoration:none;padding:4px 0;font-size:13px}.toc a:hover,a{color:var(--a)}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;margin:18px 0;box-shadow:0 8px 28px #18264b12}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.stat{background:#f8faff;border-left:4px solid var(--a);padding:14px;border-radius:10px}.stat b{display:block;font-size:25px}.small{color:var(--muted);font-size:13px}.note{border-left:4px solid var(--cyan);background:#ecfeff;padding:12px 16px;margin:16px 0}.warn{border-left-color:#eab308;background:#fffbeb}.danger{border-left-color:var(--red);background:#fff1f2}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef1f8;padding:2px 5px;border-radius:4px;color:#273256}pre{background:var(--code);color:#e5e7eb;padding:16px;border-radius:12px;overflow:auto;line-height:1.55}pre code{background:none;color:inherit;padding:0}.flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:14px 0}.box{border:1px solid #b9c5ee;background:#f5f6ff;border-radius:10px;padding:10px 13px;text-align:center;min-width:140px}.blue{border-color:#8bd2df;background:#ecfeff}.green{border-color:#9bd6ae;background:#effdf3}.arrow{font-size:23px;color:var(--a)}table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:9px}th{background:#f4f6fb}.tree{font-family:ui-monospace,monospace;white-space:pre;overflow:auto;background:#f8fafc;padding:16px;border-radius:10px;border:1px solid var(--line)}footer{color:var(--muted);padding:30px 0;text-align:center}@media(max-width:850px){.wrap{padding:14px}.layout{display:block}.toc{position:static;margin-bottom:18px}.hero{padding:28px 24px}.flow{display:block}.box{display:inline-block;margin:4px}.arrow{display:inline-block}}
+/* diagram polish */
+.flow{position:relative;overflow:auto;flex-wrap:nowrap;padding:22px 18px;margin:20px 0;border:1px solid #d8def2;border-radius:18px;background:linear-gradient(135deg,#f8f9ff,#eef8fb);box-shadow:inset 0 1px #fff}
+.flow:before{content:"";position:absolute;left:18px;right:18px;top:50%;border-top:2px dashed #c7d0ee;z-index:0}
+.flow>*{position:relative;z-index:1;flex:0 0 auto}.flow .box{min-width:150px;background:#fff;box-shadow:0 5px 14px #28366d18;font-weight:650}.flow .box.blue{background:#ecfeff;border-color:#79cddd}.flow .box.green{background:#effdf3;border-color:#8dcc9f}.flow .arrow{background:#eef1ff;padding:0 4px;border-radius:8px}
+.card:has(>h3:first-child){transition:transform .18s ease,box-shadow .18s ease}.card:has(>h3:first-child):hover{transform:translateY(-2px);box-shadow:0 14px 30px #18264b18}
+#business-flow .card{border-top:4px solid #6366f1}#business-flow .card:nth-of-type(2){border-top-color:#0891b2}#business-flow .card:nth-of-type(3){border-top-color:#16a34a}
+#sequence .card{border:0;padding:24px;background:#10172b;color:#eef2ff;box-shadow:0 12px 32px #10172b30}#sequence .card h3{color:#a5b4fc}#sequence .card .note{color:#172033}
+#sequence pre{margin:14px 0 0;background:linear-gradient(90deg,#111a31,#16213d);border:1px solid #34446d;color:#dce7ff;font-size:13px;line-height:1.7;box-shadow:inset 0 0 30px #00000024}
+@media(max-width:850px){.flow{justify-content:flex-start}.flow:before{top:50%}#sequence pre{font-size:11px;min-width:760px}.card{padding:18px}}
+.flow{scrollbar-width:thin;scrollbar-color:#b6c2e4 transparent}.flow .box{letter-spacing:.01em}.flow .arrow{font-weight:800;line-height:1}.flow + p{color:var(--muted)}
+#business-flow{scroll-margin-top:24px}#sequence{scroll-margin-top:24px}
+.sequence-image{display:block;width:100%;height:auto;max-height:760px;object-fit:contain;border:1px solid #34446d;border-radius:16px;background:#0b1224;box-shadow:0 18px 44px #10172b55}.sequence-image-caption{margin:10px 0 24px;color:#69748d;font-size:13px}
+.wrap{width:min(100% - 32px,1800px);max-width:none}.layout{grid-template-columns:minmax(210px,250px) minmax(0,1fr)}main{min-width:0}.diagram-image{display:block;width:100%;height:auto;max-height:760px;object-fit:contain;border:1px solid var(--line);border-radius:18px;background:#0b1224;box-shadow:0 18px 44px #18264b22;margin:18px 0}.diagram-caption{color:var(--muted);font-size:13px;margin-top:-8px;margin-bottom:20px}.diagram-shell{background:linear-gradient(145deg,#eef2ff,#ecfeff);border:1px solid #d5ddf2;border-radius:20px;padding:clamp(12px,2vw,24px);margin:18px 0}body{overflow-x:hidden}
+#sequence .card{overflow:hidden}#sequence pre{white-space:pre;tab-size:2}
+.seq-caption{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}.seq-caption span{font-size:12px;padding:4px 9px;border-radius:999px;background:#202c4c;color:#cbd5ff;border:1px solid #3d4d78}.seq-visual{overflow:auto;border:1px solid #34446d;border-radius:12px;background:#0b1224;padding:10px}.seq-line{display:grid;grid-template-columns:190px 1fr;min-width:900px;min-height:30px;align-items:center;border-bottom:1px solid #ffffff0d;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}.seq-line:last-child{border-bottom:0}.seq-line .seq-who{color:#a5b4fc;font-weight:700;padding:4px 10px;border-right:1px solid #34446d}.seq-line .seq-msg{color:#dbeafe;padding:4px 12px}.seq-line.event .seq-msg{color:#fcd34d}.seq-line.network .seq-msg{color:#67e8f9}.seq-line.state .seq-msg{color:#86efac}.seq-line .arrowmark{color:#818cf8;font-weight:900}.seq-line .msgmark{color:#f0abfc}.seq-line .stateword{color:#86efac;font-weight:700}
+</style>
+</head>
+<body><div class="wrap">
+<header class="hero"><h1>XiaoZhi ESP32 / YGSoul 固件<br>代码结构与核心原理</h1><div class="lead">面向当前工作区源码的深度导读：从 ESP-IDF 启动、FreeRTOS 事件循环，到音频编解码、语音协议、板卡抽象、LVGL、MCP 与 OTA，串起一条完整的设备端执行链路。</div><div class="meta"><span class="pill">C++ / C / Python / CMake</span><span class="pill">ESP-IDF 5.5.2+</span><span class="pill">ESP32-S3 / 32 MB Flash</span><span class="pill">默认目标：Waveshare 1.75C</span></div></header>
+<div class="layout"><nav class="toc"><strong>目录</strong><a href="#model">1. 全局模型</a><a href="#tree">2. 目录职责</a><a href="#boot">3. 启动初始化</a><a href="#app">4. Application 事件中枢</a><a href="#state">5. 状态机</a><a href="#audio">6. 音频管线</a><a href="#protocol">7. 协议层</a><a href="#board">8. Board 板卡抽象</a><a href="#display">9. 显示与 YGSoul</a><a href="#extra">10. MCP / Settings / OTA</a><a href="#build">11. 构建系统</a><a href="#flow">12. 关键时序</a><a href="#read">13. 阅读顺序</a><a href="#risk">14. 观察点</a></nav>
+<main>
+<section id="model"><h2>1. 先建立全局模型</h2><div class="card"><p>这是运行在微控制器上的实时语音终端。<code>Board</code> 隔离硬件差异，<code>Application</code> 集中业务调度，<code>AudioService</code> 拥有音频任务和队列，<code>Protocol</code> 拥有远端会话，<code>Display</code> 把状态投影到屏幕。</p><div class="flow"><div class="box">app_main()</div><span class="arrow">→</span><div class="box">Application</div><span class="arrow">→</span><div class="box blue">Board</div><span class="arrow">→</span><div class="box">Audio / Display / Network</div><span class="arrow">→</span><div class="box green">XiaoZhi Server</div></div><div class="grid"><div class="stat"><b>1 个</b>主业务事件循环<br><span class="small">Application::Run()</span></div><div class="stat"><b>3 类</b>音频任务<br><span class="small">输入、输出、Opus 编解码</span></div><div class="stat"><b>2 种</b>在线传输<br><span class="small">WebSocket / MQTT+UDP</span></div><div class="stat"><b>多板卡</b>同一套业务<br><span class="small">Kconfig + CMake 裁剪</span></div></div></div><div class="note"><b>阅读原则：</b>优先追踪“谁拥有状态”和“谁拥有线程”。网络/音频回调通常只设置事件位或 Schedule 闭包，真正的业务状态与 UI 更新回到 Application 主任务串行执行。</div></section>
+<section id="tree"><h2>2. 目录与职责</h2><div class="tree">.
+├── CMakeLists.txt                 ESP-IDF 顶层工程
+├── main/                          固件主组件
+│   ├── main.cc                    app_main 入口
+│   ├── application.*              业务中枢与事件循环
+│   ├── device_state*              状态枚举与合法迁移
+│   ├── protocols/                 Protocol / WebSocket / MQTT
+│   ├── audio/                     Codec / Service / VAD / 唤醒词
+│   ├── display/                   Display / LCD / OLED / LVGL
+│   ├── boards/common/             Board / WiFi / 电源 / 网络公共实现
+│   ├── boards/&lt;board&gt;/            每块板的引脚、驱动和硬件装配
+│   ├── led/                       灯和灯带
+│   ├── mcp_server.*               MCP 工具注册和消息分发
+│   ├── ota.*                      激活、版本检查、固件升级
+│   └── assets/                    语言、音频和资源
+├── managed_components/            ESP-IDF 外部组件
+├── partitions/                    Flash 分区表
+├── scripts/                       构建、资源、调试和检查工具
+├── docs/                          协议、开发、设计文档
+└── sdkconfig*                     Kconfig 生成/预置配置</div><table><thead><tr><th>层</th><th>核心文件</th><th>职责</th></tr></thead><tbody><tr><td>编排</td><td><a href="../main/application.cc">application.cc</a></td><td>事件、状态、协议回调、音频和 UI 协调。</td></tr><tr><td>硬件</td><td><a href="../main/boards/common/board.h">board.h</a></td><td>显示、Codec、网络、LED、电池、电源的稳定契约。</td></tr><tr><td>媒体</td><td><a href="../main/audio/audio_service.cc">audio_service.cc</a></td><td>实时 PCM、处理、Opus、播放和背压。</td></tr><tr><td>连接</td><td><a href="../main/protocols/protocol.h">protocol.h</a></td><td>握手、JSON、二进制音频、错误和断线。</td></tr><tr><td>呈现</td><td><a href="../main/display/display.h">display.h</a></td><td>状态、通知、聊天、情绪、状态栏和 LVGL。</td></tr></tbody></table></section>
+<section id="boot"><h2>3. 启动与初始化</h2><div class="card"><h3>3.1 app_main</h3><p><a href="../main/main.cc">main/main.cc</a> 的 <code>extern "C" void app_main()</code> 由 ESP-IDF 调用。它初始化 NVS；当出现无可用页或版本变化时擦除并重建 NVS。随后取得 Application 单例，调用 <code>Initialize()</code>，最后进入不返回的 <code>Run()</code>。</p><pre><code>nvs_flash_init()
+  └─ 异常：nvs_flash_erase() → nvs_flash_init()
+Application::GetInstance()
+  ├─ Initialize()  // 建硬件、回调、定时器、网络
+  └─ Run()         // EventGroupWaitBits() 主循环</code></pre></div><h3>3.2 Initialize 顺序</h3><ol><li>取得 Board，状态置为 Starting。</li><li>创建/配置 Display UI。</li><li>取得板卡 AudioCodec，初始化并启动 AudioService。</li><li>注册发送队列、唤醒词、VAD 回调。</li><li>注册状态监听器；监听器只设置状态变化事件位。</li><li>启动 1 秒时钟定时器。</li><li>注册公共/用户 MCP 工具。</li><li>注册网络事件回调，异步启动网络。</li></ol><div class="note warn"><b>线程边界：</b>LVGL、业务状态和协议控制不要在任意网络/音频回调里直接做重活；使用 EventGroup 或 <code>Schedule()</code> 回主任务。</div></section>
+<section id="app"><h2>4. Application：事件中枢</h2><p><a href="../main/application.h">application.h</a> 定义了固定事件位：网络连接/断开、发送音频、唤醒词、VAD、错误、激活完成、时钟、开始/停止聆听、状态改变。<code>Run()</code> 等待任意事件，读取后清除，再按顺序处理。</p><table><thead><tr><th>来源</th><th>事件</th><th>主循环动作</th></tr></thead><tbody><tr><td>AudioService</td><td><code>SEND_AUDIO</code></td><td>Pop Opus 包并调用 <code>Protocol::SendAudio()</code>。</td></tr><tr><td>唤醒词</td><td><code>WAKE_WORD_DETECTED</code></td><td>关闭旧播报，打开音频通道，发送唤醒词。</td></tr><tr><td>Protocol</td><td><code>ERROR</code></td><td>回 Idle，Alert 显示错误。</td></tr><tr><td>Board</td><td><code>NETWORK_CONNECTED</code></td><td>启动激活任务，刷新状态栏。</td></tr><tr><td>外部/UI</td><td><code>START/STOP_LISTENING</code></td><td>执行手动聆听流程。</td></tr></tbody></table><p><code>Schedule()</code> 是跨线程的串行化入口：闭包先进入互斥保护的 <code>main_tasks_</code>，再用 <code>MAIN_EVENT_SCHEDULE</code> 唤醒主循环。每秒更新状态栏，每十秒打印堆统计。</p></section>
+<section id="state"><h2>5. DeviceStateMachine：生命周期安全网</h2><p><a href="../main/device_state_machine.cc">DeviceStateMachine</a> 使用原子当前状态、互斥保护的监听器列表和显式迁移表，阻止服务器事件把设备推进到非法状态。</p><div class="flow"><div class="box">Unknown</div><span class="arrow">→</span><div class="box">Starting</div><span class="arrow">→</span><div class="box">Activating</div><span class="arrow">→</span><div class="box green">Idle</div></div><div class="flow"><div class="box green">Idle</div><span class="arrow">→</span><div class="box blue">Connecting</div><span class="arrow">→</span><div class="box blue">Listening</div><span class="arrow">↔</span><div class="box">Speaking</div></div><table><thead><tr><th>状态</th><th>含义</th></tr></thead><tbody><tr><td>Starting</td><td>硬件已开始初始化，等待网络。</td></tr><tr><td>WifiConfiguring</td><td>无凭据或用户进入配网，可做音频测试。</td></tr><tr><td>Activating</td><td>OTA 激活、资源/固件检查、协议初始化。</td></tr><tr><td>Idle</td><td>已就绪，等待唤醒词、按键或触摸。</td></tr><tr><td>Connecting</td><td>建立会话并等待 server hello。</td></tr><tr><td>Listening</td><td>采集、处理、编码并上传。</td></tr><tr><td>Speaking</td><td>解码服务器音频并播放。</td></tr></tbody></table></section>
+<section id="audio"><h2>6. AudioService：实时音频管线</h2><p><a href="../main/audio/audio_service.h">AudioService</a> 用队列把 PCM 实时处理和网络 Opus 包隔开。PCM 大且对延迟敏感，Opus 小且适合作为网络边界。</p><div class="flow"><div class="box blue">麦克风 PCM<br>16-bit</div><span class="arrow">→</span><div class="box">AudioProcessor<br>VAD / AEC</div><span class="arrow">→</span><div class="box">Opus Encoder<br>60 ms</div><span class="arrow">→</span><div class="box green">send_queue</div><span class="arrow">→</span><div class="box">Protocol</div></div><div class="flow"><div class="box green">incoming Opus</div><span class="arrow">→</span><div class="box">decode_queue</div><span class="arrow">→</span><div class="box">Decoder<br>+ resampler</div><span class="arrow">→</span><div class="box">playback_queue</div><span class="arrow">→</span><div class="box blue">扬声器 PCM</div></div><table><thead><tr><th>任务</th><th>职责</th><th>同步</th></tr></thead><tbody><tr><td><code>AudioInputTask</code></td><td>读取 10 ms PCM，喂给唤醒词/处理器；测试模式按 60 ms 采样。</td><td>音频 EventGroup 位。</td></tr><tr><td><code>OpusCodecTask</code></td><td>编码发送包，解码播放包，必要时重采样。</td><td>队列 + condition_variable。</td></tr><tr><td><code>AudioOutputTask</code></td><td>消费播放队列，按需打开功放，输出 PCM。</td><td>队列非空或停止。</td></tr></tbody></table><ul><li><b>固定帧：</b>16 kHz × 60 ms = 960 个单声道采样。</li><li><b>背压：</b>发送、解码、播放队列有上限，保护 RAM 和实时性。</li><li><b>AEC：</b>Kconfig 在设备侧和服务端侧二选一，构造函数用预处理器禁止同时打开。</li><li><b>唤醒词：</b>ESP-SR/自定义实现位于 <code>audio/wake_words/</code>，Service 依赖统一 <code>WakeWord</code> 接口。</li></ul></section>
+<section id="protocol"><h2>7. Protocol：WebSocket 与 MQTT + UDP</h2><p><a href="../main/protocols/protocol.h">Protocol</a> 定义 Start、Open/CloseAudioChannel、SendAudio 和 JSON/音频/连接/错误回调。Application 不感知底层传输。</p><table><thead><tr><th>实现</th><th>控制面</th><th>音频面</th><th>关键点</th></tr></thead><tbody><tr><td>WebsocketProtocol</td><td>WebSocket 文本帧</td><td>WebSocket 二进制帧</td><td>二进制协议版本 2/3；头部含类型、长度、时间戳。</td></tr><tr><td>MqttProtocol</td><td>MQTT publish/subscribe</td><td>UDP + AES-CTR</td><td>控制/媒体分离；断线定时重连。</td></tr></tbody></table><h3>7.1 握手</h3><ol><li>OTA 配置决定实现；缺省回退 MQTT。</li><li>发送 hello JSON，清理旧 session。</li><li>等待 server-hello 事件位，十秒超时转错误。</li><li>解析 session_id、服务端采样率和帧时长。</li><li>通道打开后切换电源到 PERFORMANCE。</li></ol><pre><code>stt                → Display::SetChatMessage("user", text)
+tts/start          → state = Speaking
+tts/stop           → state = Listening 或 Idle
+tts/sentence_start → 显示 assistant 文本
+llm                → Display::SetEmotion(emotion)
+mcp                → McpServer::ParseMessage(payload)
+system/reboot      → Schedule(Reboot)
+alert              → Application::Alert(...)</code></pre></section>
+<section id="board"><h2>8. Board：一套业务适配多种硬件</h2><p><a href="../main/boards/common/board.h">Board</a> 是多态单例，实例类型由编译期的 <code>create_board()</code> 决定。选中的板卡源文件调用 <code>DECLARE_BOARD()</code> 提供唯一工厂实现。</p><pre><code>CONFIG_BOARD_TYPE_*
+        ↓
+main/CMakeLists.txt
+        ↓
+boards/&lt;BOARD_TYPE&gt;/*.cc
+        ↓
+SelectedBoard : WifiBoard : Board
+        ↓
+Board::GetInstance()
+  ├─ GetAudioCodec()
+  ├─ GetDisplay()
+  ├─ GetNetwork()
+  ├─ GetLed()
+  └─ SetPowerSaveLevel()</code></pre><p>网络公共层有 <code>WifiBoard</code>、<code>Ml307Board</code>、<code>Nt26Board</code>、<code>DualNetworkBoard</code> 等。具体板卡负责总线、LCD/OLED、Codec、按键、电源和对象装配；不负责语音业务。</p><h3>8.1 1.75C 实际选择</h3><p><code>sdkconfig.175c</code> 打开 <code>CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75C=y</code>；<a href="../main/Kconfig.projbuild">Kconfig.projbuild</a> 声明选项；<a href="../main/CMakeLists.txt">main/CMakeLists.txt</a> 把它映射到 <code>BOARD_TYPE=esp32-s3-touch-amoled-1.75</code>，并选择字体/emoji 与源目录。</p><table><thead><tr><th>能力</th><th>实现</th></tr></thead><tbody><tr><td>屏幕</td><td>466×466 AMOLED，CO5300，QSPI，CST9217 触摸。</td></tr><tr><td>音频</td><td>BoxAudioCodec，ES8311/ES7210 相关 I2C/I2S。</td></tr><tr><td>电源</td><td>AXP2101，低功耗/平衡/性能等级。</td></tr><tr><td>输入</td><td>BOOT GPIO 0、触摸输入和板卡事件。</td></tr></tbody></table><div class="note warn"><b>易混淆点：</b>1.75 与 1.75C 共用 <code>main/boards/waveshare/esp32-s3-touch-amoled-1.75/</code> 目录，但 <code>config.h</code> 依据两个 Kconfig 宏选择不同 GPIO。</div></section>
+<section id="display"><h2>9. Display 与 YGSoul</h2><p>显示继承层次可概括为：</p><pre><code>Display
+├─ NoDisplay
+└─ LvglDisplay
+   ├─ OledDisplay
+   └─ LcdDisplay
+      ├─ SpiLcdDisplay
+      ├─ RgbLcdDisplay
+      └─ MipiLcdDisplay</code></pre><p><a href="../main/display/display.h">Display</a> 统一提供状态、通知、情绪、聊天、主题、状态栏和电源模式。<code>DisplayLockGuard</code> 用 RAII 调用 Lock/Unlock，保护 LVGL 操作。1.75C 的 <code>CustomLcdDisplay</code> 复用通用 LCD UI，只加入 YGSoul 背景色、角色图片、启动 Logo、聊天颜色和说话动画。</p><table><thead><tr><th>状态</th><th>视觉投影</th></tr></thead><tbody><tr><td>启动</td><td><code>ygsoul_boot_lvgl.h</code> 启动画面。</td></tr><tr><td>Idle</td><td>角色待机浮动，状态栏显示网络/电池。</td></tr><tr><td>Speaking</td><td>浮动周期缩短并增加缩放动画。</td></tr><tr><td>错误/通知</td><td>状态文字、情绪和提示音。</td></tr></tbody></table></section>
+<section id="extra"><h2>10. MCP、Settings 与 OTA</h2><h3>10.1 MCP</h3><p><a href="../main/mcp_server.cc">McpServer</a> 启动时注册公共和用户工具，例如音量、灯光、GPIO、拍照和显示控制。服务器的 <code>type=mcp</code> payload 经 Protocol → Application → McpServer，工具结果再经 Application → Protocol 返回。</p><div class="flow"><div class="box green">MCP call</div><span class="arrow">→</span><div class="box">Protocol JSON</div><span class="arrow">→</span><div class="box">Application</div><span class="arrow">→</span><div class="box blue">McpServer</div><span class="arrow">→</span><div class="box">Board / Display</div></div><h3>10.2 Settings</h3><p><a href="../main/settings.cc">Settings</a> 把运行时配置放入 NVS 命名空间：Board 保存 UUID；MQTT 读取 endpoint、凭据、主题和 keepalive；OTA 读取服务地址与激活数据。</p><h3>10.3 OTA</h3><ol><li>网络连接后后台 ActivationTask 创建 Ota，检查资源和固件版本并激活设备。</li><li>运行期升级下载固件写入 OTA 分区，验证后重启。</li></ol><p>Flash 分区位于 <a href="../partitions/v2/32m.csv">partitions/v2/32m.csv</a> 等文件；assets 可由 CMake 调用 <a href="../scripts/build_default_assets.py">build_default_assets.py</a> 生成。</p></section>
+<section id="build"><h2>11. CMake、Kconfig 与资源</h2><div class="flow"><div class="box">sdkconfig.defaults</div><span class="arrow">+</span><div class="box">sdkconfig.defaults.esp32s3</div><span class="arrow">+</span><div class="box">sdkconfig.175c</div><span class="arrow">→</span><div class="box blue">Kconfig 宏</div><span class="arrow">→</span><div class="box">main/CMakeLists.txt</div><span class="arrow">→</span><div class="box green">固件 + assets</div></div><table><thead><tr><th>文件</th><th>作用</th></tr></thead><tbody><tr><td><a href="../CMakeLists.txt">CMakeLists.txt</a></td><td>接入 ESP-IDF，工程名 xiaozhi，版本 2.2.4。</td></tr><tr><td><a href="../main/Kconfig.projbuild">Kconfig.projbuild</a></td><td>板卡、AEC、协议、语言、资源功能开关。</td></tr><tr><td><a href="../main/CMakeLists.txt">main/CMakeLists.txt</a></td><td>源文件、板卡、字体、emoji、语言和资源分区选择。</td></tr><tr><td><a href="../partitions/v2/32m.csv">32m.csv</a></td><td>app、OTA 数据和 assets 的 Flash 布局。</td></tr></tbody></table><div class="note"><b>核心取舍：</b>板卡差异在编译期解决，传输协议依据 OTA 配置在运行期选择；这样能控制固件体积，同时保持 Application 的稳定接口。</div></section>
+<section id="flow"><h2>12. 关键业务时序</h2><h3>12.1 首次开机</h3><pre><code>app_main → NVS → Application::Initialize
+  → Board / Display / AudioService
+  → Board::StartNetwork (异步)
+  → NETWORK_CONNECTED
+  → Activating: Ota 检查/激活/InitializeProtocol
+  → ACTIVATION_DONE → Idle</code></pre><h3>12.2 唤醒到回复</h3><pre><code>麦克风 PCM → WakeWord::Feed
+  → WAKE_WORD_DETECTED → OpenAudioChannel
+  → hello / server hello → Listening
+  → PCM → Processor/VAD → Opus → send_queue → Protocol
+  → STT JSON 显示用户文字
+  → TTS start → Speaking
+  → Opus → decode_queue → Decoder → playback_queue → 扬声器
+  → sentence_start 显示 assistant → TTS stop → Listening/Idle</code></pre><h3>12.3 断网</h3><p>Board 产生 Disconnected → Application 设置事件位 → 若在 Connecting/Listening/Speaking 则关闭音频通道 → 刷新状态栏 → 回 Idle。MQTT 另有重连定时器，但重连动作通过 Schedule 回主任务。</p></section>
+<section id="read"><h2>13. 推荐源码阅读顺序</h2><ol><li><a href="../README.md">README.md</a>：产品、目标板、构建方式。</li><li><a href="../main/main.cc">main.cc</a>：入口。</li><li><a href="../main/application.h">application.h</a>：事件位和对象所有权。</li><li><a href="../main/application.cc">application.cc</a>：Initialize → Run → Activation → Protocol → Listening。</li><li><a href="../main/device_state_machine.cc">device_state_machine.cc</a>：合法迁移。</li><li><a href="../main/audio/audio_service.cc">audio_service.cc</a>：三个任务、队列、重采样。</li><li><a href="../main/protocols/">protocols/</a>：抽象与两种传输。</li><li><a href="../main/boards/common/board.h">board.h</a> → <a href="../main/boards/common/wifi_board.cc">wifi_board.cc</a> → 目标板。</li><li><a href="../main/display/">display/</a> → 目标板 CustomLcdDisplay。</li><li><a href="../main/mcp_server.cc">mcp_server.cc</a>、<a href="../main/ota.cc">ota.cc</a>：扩展能力。</li></ol></section>
+<section id="risk"><h2>14. 代码观察点与排查指南</h2><div class="card"><h3>无响应</h3><ol><li>确认 <code>Application::Run()</code> 仍在等待事件而非任务崩溃。</li><li>确认状态迁移合法；非法迁移会打印 warning。</li><li>确认 AudioService 事件位、队列和背压。</li><li>确认 hello 是否超时、MQTT endpoint/WS 配置是否来自正确 NVS。</li><li>确认 Display Lock 和 LVGL 操作是否在正确线程。</li></ol></div><div class="card"><h3>编译成功但行为不像目标板</h3><p>检查 sdkconfig 是否在 reconfigure 时真正合入；确认只有一个 <code>CONFIG_BOARD_TYPE_*</code> 为 y；确认 CMake 映射到目标目录。1.75C 与 1.75 共目录，GPIO 依赖宏，是首要检查点。</p></div><div class="note danger"><b>分析边界：</b>本文以当前工作区源码为准，未展开 build 生成物、managed_components 外部组件内部实现和真实串口日志。进一步验证应结合 <code>compile_commands.json</code>、ESP-IDF 组件 API 与硬件运行日志。</div></section>
+<section id="business-flow"><h2>12. 核心业务流程图</h2>
+<div class="card"><h3>12.1 上电到可对话</h3><div class="flow"><div class="box">app_main</div><span class="arrow">→</span><div class="box">NVS</div><span class="arrow">→</span><div class="box">Board</div><span class="arrow">→</span><div class="box">Display + Audio</div><span class="arrow">→</span><div class="box">异步联网</div><span class="arrow">→</span><div class="box">Activating</div><span class="arrow">→</span><div class="box green">Idle</div></div><p>失败分支：NVS 擦除重建；网络进入配网/重连；激活失败通过错误事件恢复。</p></div>
+<div class="card"><h3>12.2 唤醒到语音回复</h3><div class="flow"><div class="box blue">麦克风 PCM</div><span class="arrow">→</span><div class="box">WakeWord / VAD</div><span class="arrow">→</span><div class="box">握手</div><span class="arrow">→</span><div class="box green">Listening</div><span class="arrow">→</span><div class="box">Opus 上传</div><span class="arrow">→</span><div class="box">STT/LLM/TTS</div><span class="arrow">→</span><div class="box">Opus 下发</div><span class="arrow">→</span><div class="box blue">扬声器</div></div><p>JSON 更新文字/情绪；二进制音频走独立队列，不阻塞 UI。</p></div>
+<div class="card"><h3>12.3 断网与恢复</h3><div class="flow"><div class="box">Disconnected</div><span class="arrow">→</span><div class="box">事件位</div><span class="arrow">→</span><div class="box">CloseAudioChannel</div><span class="arrow">→</span><div class="box green">Idle / 配网</div><span class="arrow">→</span><div class="box">MQTT 重连定时器</div><span class="arrow">→</span><div class="box green">Connected</div></div></div>
+<h3>12.4 业务决策树</h3><pre><code>网络连接成功？
+├─ 否 → WifiBoard：连接 / 网页配网
+└─ 是 → 首次激活？
+        ├─ 是 → Ota::Activate → InitializeProtocol → Idle
+        └─ 否 → 初始化协议 → Idle
+Idle 收到唤醒？
+├─ 否 → 低功耗等待
+└─ 是 → OpenAudioChannel 成功？
+        ├─ 否 → Alert → Idle
+        └─ 是 → Listening → 上传 Opus
+TTS start → Speaking → 解码/播放
+TTS stop → 手动模式 Idle；自动模式 Listening</code></pre></section>
+<section id="sequence"><h2>13. 详细时序图</h2><p>实线是调用/网络消息；事件位是跨线程唤醒。Application 是主任务，AudioService 三个任务并行运行。</p>
+<div class="card"><h3>13.1 首次启动、激活和协议初始化</h3><pre><code>ESP-IDF       app_main       Application       Board/WiFi       Ota        Server
+  |               |               |               |             |            |
+  |               |--NVS init---->|               |             |            |
+  |               |--Initialize()---------------->|             |            |
+  |               |               |--create_board()->SelectedBoard          |
+  |               |               |--SetupUI()---->|             |            |
+  |               |               |--AudioService.Initialize/Start          |
+  |               |               |--StartNetwork()->|           |            |
+  |               |               |               |--异步连接---->|            |
+  |               |               |&lt;--NETWORK_CONNECTED 事件---|            |
+  |               |               |--ActivationTask()----------------------->|
+  |               |               |               |             |--检查/激活--->|
+  |               |               |&lt;--ACTIVATION_DONE 事件                   |
+  |               |               |--Activating → Idle                       |</code></pre><div class="note"><b>线程边界：</b>ActivationTask 做耗时工作，只设置完成事件；状态和 UI 由主循环落地。</div></div>
+<div class="card"><h3>13.2 唤醒、握手、上传和服务器回复</h3><pre><code>InputTask       AudioService   Application   Protocol   Server   OutputTask   Display
+    |                |              |           |         |           |           |
+    |--10ms PCM----->|              |           |         |           |           |
+    |                |--WakeWord-->|           |         |           |           |
+    |                |              |&lt;--事件----|         |           |           |
+    |                |              |--OpenAudioChannel()-->|         |           |
+    |                |              |           |--hello--->|           |           |
+    |                |              |           |&lt;--hello----|           |           |
+    |                |              |--Connecting → Listening          |           |
+    |--PCM→VAD/AEC→Opus→send_queue------------------------------->|           |
+    |                |              |&lt;--SEND_AUDIO 事件----|           |           |
+    |                |              |--SendAudio()-------->|           |           |
+    |                |              |           |--Opus---->|           |           |
+    |                |              |           |&lt;--STT JSON|           |           |
+    |                |              |-------------------------------------------->| 用户文字
+    |                |              |           |&lt;--TTS start|          |           |
+    |                |              |--Listening → Speaking          |           |
+    |                |              |           |&lt;--Opus----|           |           |
+    |                |              |--------------------------------->| decode    |
+    |                |              |           |&lt;--sentence_start       |           |
+    |                |              |-------------------------------------------->| assistant
+    |                |              |           |&lt;--TTS stop|           |           |
+    |                |              |--Speaking → Listening / Idle    |           |</code></pre></div>
+<div class="card"><h3>13.3 断网和 MQTT 重连</h3><pre><code>Network          Protocol       Application       AudioService       Display
+   |                |                |                |                |
+   |--Disconnected->|                |                |                |
+   |                |                |&lt;--NETWORK_DISCONNECTED 事件----|
+   |                |                |--CloseAudioChannel()---------->|
+   |                |&lt;--关闭回调-----|                |                |
+   |                |                |--State → Idle---------------->|
+   |                |                |----------------UpdateStatusBar->|
+   |                |--esp_timer: reconnect (MQTT)                     |
+   |                |--Schedule(StartMqttClient)---------------------->|
+   |                |                |                |                |</code></pre></div>
+</section>
+</main></div><footer>生成于当前工作区源码分析 · docs/xiaozhi-architecture.html</footer></div>
+<script>
+var diagramMap={
+  "#model":["assets/xiaozhi-architecture-overview.png","图 1-A · 总体架构图：输入（麦克风/触摸/网络事件）→ Board 与 Application → 输出（音频、显示、网络、LED、协议命令）。"],
+  "#audio":["assets/xiaozhi-audio-pipeline.png","图 6-A · 音频实时管线：上行采集/编码与下行解码/播放。"],
+  "#board":["assets/xiaozhi-code-structure.png","图 8-A · 代码结构与板卡抽象：Kconfig → CMake → create_board() → 运行时接口。"],
+  "#business-flow":["assets/xiaozhi-business-flow.png","图 12-A · 核心业务流程：每个节点标注输入/输出，包含网络、激活、音频通道和重试分支。"],
+  "#sequence":["assets/xiaozhi-sequence-overview-v2.png","图 13-A · 详细时序总览：按输入、输出、事件、动作区分启动激活、语音会话和断网重连。"]
+};
+Object.keys(diagramMap).forEach(function(selector){
+  var section=document.querySelector(selector);
+  if(!section)return;
+  var shell=document.createElement("div");shell.className="diagram-shell";
+  var img=document.createElement("img");img.className="diagram-image";img.src=diagramMap[selector][0];img.alt=diagramMap[selector][1];
+  var cap=document.createElement("div");cap.className="diagram-caption";cap.textContent=diagramMap[selector][1];
+  shell.appendChild(img);shell.appendChild(cap);section.insertBefore(shell,section.children[1]||null);
+});
+document.querySelectorAll("#sequence .card pre").forEach(function(pre){
+  var lines=pre.textContent.split("\n").filter(function(x){return x.trim()});
+  var visual=document.createElement("div"); visual.className="seq-visual";
+  var cap=document.createElement("div"); cap.className="seq-caption";
+  (lines.shift()||"").trim().split(/\s{2,}/).filter(Boolean).forEach(function(name){var s=document.createElement("span");s.textContent=name;cap.appendChild(s)});
+  visual.appendChild(cap);
+  lines.forEach(function(raw){
+    var row=document.createElement("div"), who=document.createElement("div"), msg=document.createElement("div");
+    row.className="seq-line";
+    if(/事件|Disconnected|reconnect/.test(raw)) row.classList.add("event");
+    if(/hello|Opus|JSON|NVS|Activate|StartNetwork|CloseAudio/.test(raw)) row.classList.add("network");
+    if(/State|Listening|Speaking|Idle|ACTIVATION_DONE/.test(raw)) row.classList.add("state");
+    who.className="seq-who"; msg.className="seq-msg";
+    who.textContent=(raw.match(/^\s*([A-Za-z][\w-]*)/)||["","系统"])[1];
+    msg.textContent=raw.trim();
+    row.appendChild(who);row.appendChild(msg);visual.appendChild(row);
+  });
+  pre.replaceWith(visual);
+});
+</script>
+</body></html>

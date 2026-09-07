@@ -185,11 +185,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
         return false;
     }
 
-    // Wait for server hello
-    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+    // Wait for server hello. First connect used to miss the 10s window while
+    // the server warmed ASR; stay connecting instead of dropping to idle.
+    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(20000));
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
-        SetError(Lang::Strings::SERVER_TIMEOUT);
+        websocket_.reset();
         return false;
     }
 

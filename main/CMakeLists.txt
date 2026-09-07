@@ -29,8 +29,12 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
+            "protocols/ydp_protocol.cc"
+            "protocols/ydp_bootstrap.cc"
+            "protocols/ydp_client.cc"
             "mcp_server.cc"
             "system_info.cc"
+            "device_management_client.cc"
             "application.cc"
             "ota.cc"
             "settings.cc"
@@ -755,6 +759,10 @@ endif()
 if (CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
     list(APPEND SOURCES "boards/common/blufi.cpp")
 endif ()
+if (CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING)
+    list(APPEND SOURCES "boards/common/ygsoul_ble_protocol.cc"
+                        "boards/common/ygsoul_ble_provisioning.cc")
+endif ()
 # Select language directory according to Kconfig
 if(CONFIG_LANGUAGE_ZH_CN)
     set(LANG_DIR "zh-CN")
@@ -905,6 +913,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_i2s
                         esp_driver_jpeg
                         esp_driver_ppa
+                        esp_http_client
                         esp_app_format
                         app_update
                         spi_flash

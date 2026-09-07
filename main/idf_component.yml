@@ -20,10 +20,14 @@ dependencies:
   waveshare/custom_io_expander_ch32v003: ^1.0.0
   espressif/esp_lcd_panel_io_additions: ^1.0.1
   78/esp_lcd_nv3023: ~1.0.0
-  78/esp-wifi-connect: ~3.1.1
+  # 本项目已验证的 Wi-Fi 配网补丁，必须以本地组件固定，避免构建时覆盖。
+  78/esp-wifi-connect:
+    override_path: "../components/78__esp-wifi-connect"
   espressif/esp_audio_effects: ~1.2.1
   espressif/esp_audio_codec: ~2.4.1
-  78/esp-ml307: ~3.6.4
+  # 本项目已验证的 TLS 超时修复，必须以本地组件固定，避免构建时覆盖。
+  78/esp-ml307:
+    override_path: "../components/78__esp-ml307"
   78/uart-eth-modem:
     version: ~0.3.3
     rules:
@@ -53,7 +57,9 @@ dependencies:
   waveshare/esp_lcd_touch_cst9217: ^1.0.3
   espressif/esp_lcd_touch_cst816s: ^1.0.6
   lvgl/lvgl: ~9.4.0
-  esp_lvgl_port: ~2.7.0
+  # 本项目已验证的触控适配，必须以本地组件固定，避免构建时覆盖。
+  esp_lvgl_port:
+    override_path: "../components/espressif__esp_lvgl_port"
   espressif/esp_io_expander_tca95xx_16bit: ^2.0.0
   espressif2022/image_player: ^1.1.1
   espressif2022/esp_emote_expression: ^0.1.0

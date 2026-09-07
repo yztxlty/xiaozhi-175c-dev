@@ -44,14 +44,20 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
             return to == kDeviceStateStarting;
 
         case kDeviceStateStarting:
-            // Can go to wifi configuring or activating
+            // Wi-Fi ready goes to connecting/listening; protocol connects in background.
             return to == kDeviceStateWifiConfiguring ||
-                   to == kDeviceStateActivating;
+                   to == kDeviceStateActivating ||
+                   to == kDeviceStateIdle ||
+                   to == kDeviceStateConnecting ||
+                   to == kDeviceStateListening;
 
         case kDeviceStateWifiConfiguring:
-            // Can go to activating (after wifi connected) or audio testing
+            // Pairing complete: enter chat without an initializing gate.
             return to == kDeviceStateActivating ||
-                   to == kDeviceStateAudioTesting;
+                   to == kDeviceStateAudioTesting ||
+                   to == kDeviceStateIdle ||
+                   to == kDeviceStateConnecting ||
+                   to == kDeviceStateListening;
 
         case kDeviceStateAudioTesting:
             // Can go back to wifi configuring

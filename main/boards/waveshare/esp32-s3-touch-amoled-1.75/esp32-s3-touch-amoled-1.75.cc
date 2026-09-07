@@ -410,8 +410,10 @@ private:
         GetDisplay()->SetPowerSaveMode(true);
         GetBacklight()->SetBrightness(1);
         auto& audio = Application::GetInstance().GetAudioService();
+        // CRITICAL-RUNTIME-CONTRACT: super power save must not close Wi-Fi/WSS.
+        // It only dims the display and leaves wake-word detection available.
         audio.EnableVoiceProcessing(false);
-        audio.EnableWakeWordDetection(false);
+        audio.EnableWakeWordDetection(true);
         ESP_LOGI(TAG, "PWR: enter super power save");
     }
 
@@ -438,7 +440,8 @@ private:
             ESP_LOGW(TAG, "PWR: failed to read EXIO4");
             return;
         }
-        const bool pressed = (levels & PWR_BUTTON_INPUT_MASK) != 0;
+        // EXIO4 is active-low on this board; invert only this read, not the PWR semantics.
+        const bool pressed = (levels & PWR_BUTTON_INPUT_MASK) == 0;
         const int64_t now_us = esp_timer_get_time();
         if (pressed && !pwr_button_pressed_) {
             pwr_button_pressed_ = true;
@@ -448,11 +451,13 @@ private:
         }
         if (pressed && !pwr_button_long_pressed_ && now_us - pwr_button_pressed_at_us_ >= PWR_BUTTON_LONG_PRESS_US) {
             pwr_button_long_pressed_ = true;
+            ESP_LOGI(TAG, "PWR long press 3s, enter super power save raw=0x%lx", (unsigned long)levels);
             EnterSuperPowerSave();
             return;
         }
         if (!pressed && pwr_button_pressed_) {
             if (!pwr_button_long_pressed_) {
+                ESP_LOGI(TAG, "PWR short press, toggle super power save raw=0x%lx", (unsigned long)levels);
                 if (super_power_save_) {
                     ExitSuperPowerSave();
                 } else {
@@ -492,11 +497,37 @@ private:
     }
 
     void InitializeTca9554(void) {
-        esp_err_t ret = esp_io_expander_new_i2c_tca9554(i2c_bus_, I2C_ADDRESS, &io_expander);
-        if (ret != ESP_OK)
-            ESP_LOGE(TAG, "TCA9554 create returned error");
-        ret = esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_4, IO_EXPANDER_INPUT);
-        ESP_ERROR_CHECK(ret);
+        io_expander = NULL;
+        const uint32_t addrs[] = {
+            ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000,
+            ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_001,
+            ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_010,
+            ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_011,
+            ESP_IO_EXPANDER_I2C_TCA9554A_ADDRESS_000,
+            ESP_IO_EXPANDER_I2C_TCA9554A_ADDRESS_001,
+            ESP_IO_EXPANDER_I2C_TCA9554A_ADDRESS_010,
+            ESP_IO_EXPANDER_I2C_TCA9554A_ADDRESS_011,
+        };
+        for (uint32_t addr : addrs) {
+            if (i2c_master_probe(i2c_bus_, addr, 80) != ESP_OK) {
+                continue;
+            }
+            ESP_LOGI(TAG, "I2C ack at 0x%02lx, try TCA9554", (unsigned long)addr);
+            esp_err_t ret = esp_io_expander_new_i2c_tca9554(i2c_bus_, addr, &io_expander);
+            if (ret != ESP_OK || io_expander == NULL) {
+                io_expander = NULL;
+                continue;
+            }
+            ret = esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_4, IO_EXPANDER_INPUT);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "TCA9554 EXIO4 dir failed at 0x%02lx", (unsigned long)addr);
+                io_expander = NULL;
+                continue;
+            }
+            ESP_LOGI(TAG, "PWR EXIO4 ready at 0x%02lx", (unsigned long)addr);
+            return;
+        }
+        ESP_LOGW(TAG, "TCA9554 not found on I2C, PWR software path unavailable");
     }
 
     void InitializeAxp2101() {
@@ -518,7 +549,11 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
+            ESP_LOGI(TAG, "BOOT short press");
             auto& app = Application::GetInstance();
+            if (super_power_save_) {
+                ExitSuperPowerSave();
+            }
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
                 return;
@@ -527,6 +562,7 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
+            ESP_LOGI(TAG, "BOOT long press 3s, enter wifi config");
             EnterWifiConfigMode();
         });
 

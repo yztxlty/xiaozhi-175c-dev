@@ -11,7 +11,9 @@
 #include "assets.h"
 #include "settings.h"
 #include "ssid_manager.h"
+#include "ydp_bootstrap.h"
 #include "wifi_board.h"
+#include "wifi_manager.h"
 #ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
 #include "ygsoul_ble_provisioning.h"
 #endif
@@ -93,6 +95,11 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     audio_service_.SetCallbacks(callbacks);
+
+    // Load packaged speech models before the device can enter BLE pairing.
+    // Wi-Fi configuration also enters standby and enables wake-word detection.
+    auto& assets = Assets::GetInstance();
+    assets.Apply();
 
     // Add state change listeners
     state_machine_.AddStateChangeListener([this](DeviceState old_state, DeviceState new_state) {
@@ -300,7 +307,8 @@ void Application::HandleNetworkConnectedEvent() {
         return;
     }
 
-    if (state == kDeviceStateStarting) {
+    // 配网退出可能先进入待命；联网初始化不能只依赖界面状态。
+    if (state == kDeviceStateStarting || protocol_ == nullptr) {
         SetDeviceState(kDeviceStateConnecting);
         StartActivationIfNeeded();
     }
@@ -313,7 +321,7 @@ void Application::HandleNetworkConnectedEvent() {
 void Application::HandleNetworkDisconnectedEvent() {
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
-    if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+    if (protocol_ && (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking)) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
         protocol_->CloseAudioChannel();
     }
@@ -353,14 +361,16 @@ void Application::ActivationTask() {
     if (have_local_endpoints) {
         ESP_LOGI(TAG, "Reuse local websocket/management endpoints, skip version check");
     } else {
-        esp_err_t err = ota_->CheckVersion();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Connection config fetch failed (0x%x), continue with local settings", err);
-        } else {
-            ota_->MarkCurrentVersionValid();
-            ota_->ConfirmPendingUpgrade();
+        while (ota_->CheckVersion() != ESP_OK) {
+            ESP_LOGW(TAG, "Connection config fetch failed, retry in 1 second");
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
+
+    // A successful OTA must be acknowledged after reboot even when connection
+    // endpoints were already cached before the upgrade.
+    ota_->MarkCurrentVersionValid();
+    ota_->ConfirmPendingUpgrade();
 
     // Initialize the protocol
     InitializeProtocol();
@@ -570,13 +580,14 @@ void Application::InitializeProtocol() {
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                    if (GetDeviceState() != kDeviceStateSpeaking) {
+                        return;
                     }
+                    if (voice_dismissed_ || listening_mode_ == kListeningModeManualStop) {
+                        EnterStandby();
+                        return;
+                    }
+                    SetDeviceState(kDeviceStateListening);
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
@@ -603,7 +614,7 @@ void Application::InitializeProtocol() {
                 }
             }
         } else if (strcmp(type->valuestring, "device.standby") == 0) {
-            Schedule([this]() { EnterVoiceDismissed(); });
+            Schedule([this]() { EnterStandby(); });
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
@@ -729,6 +740,11 @@ void Application::HandleCustomMessage(const cJSON* root) {
         }
     } else if (strcmp(command->valuestring, "reportStatus") == 0) {
         succeeded = true;
+    } else if (strcmp(command->valuestring, "checkOta") == 0) {
+        succeeded = GetDeviceState() != kDeviceStateUpgrading;
+        if (!succeeded) {
+            error_code = "ota_in_progress";
+        }
     } else if (strcmp(command->valuestring, "clearStorage") == 0) {
         ESP_LOGI(TAG, "Custom command clearStorage requestId=%s", request_id->valuestring);
         succeeded = Assets::GetInstance().PurgeTransient();
@@ -737,7 +753,8 @@ void Application::HandleCustomMessage(const cJSON* root) {
             error_code = "storage_purge_failed";
         }
     } else if (strcmp(command->valuestring, "unbind") == 0) {
-        // Account unbind only: keep local Wi-Fi so the device stays reachable.
+        // CRITICAL-RUNTIME-CONTRACT: App unbind is a re-pair operation. ACK first,
+        // then clear local Wi-Fi and enter provisioning; ordinary reboot never clears Wi-Fi.
         ESP_LOGI(TAG, "Custom command unbind requestId=%s", request_id->valuestring);
         succeeded = true;
     } else if (strcmp(command->valuestring, "factoryReset") == 0) {
@@ -780,19 +797,42 @@ void Application::HandleCustomMessage(const cJSON* root) {
     if (succeeded && command_changes_telemetry) {
         ReportDeviceUplink("telemetry");
     }
+    if (succeeded && strcmp(command->valuestring, "checkOta") == 0) {
+        Schedule([this]() {
+            ota_ = std::make_unique<Ota>();
+            if (ota_->CheckVersion() != ESP_OK) {
+                ESP_LOGW(TAG, "Manual OTA check failed");
+                return;
+            }
+            if (ota_->HasNewVersion()) {
+                UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion());
+            }
+        });
+    }
+    if (succeeded && strcmp(command->valuestring, "unbind") == 0) {
+        ESP_LOGI(TAG, "unbind ACK sent, clearing Wi-Fi and entering provisioning");
+        ReportDeviceUplink("event", "device.offline");
+        Schedule([]() {
+            vTaskDelay(pdMS_TO_TICKS(800));
+            // CRITICAL-RUNTIME-CONTRACT: do not reboot here. A normal physical reboot
+            // keeps saved Wi-Fi; only this explicit App-unbind path removes it.
+            SsidManager::GetInstance().Clear();
+            Settings wifi_settings("wifi", true);
+            wifi_settings.EraseAll();
+            WifiManager::GetInstance().StopStation();
+            static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
+        });
+    }
     if (succeeded && strcmp(command->valuestring, "factoryReset") == 0) {
         ESP_LOGI(TAG, "factoryReset ACK sent, wiping wifi after flush");
+        ReportDeviceUplink("event", "device.offline");
         Schedule([this]() {
             vTaskDelay(pdMS_TO_TICKS(2500));
             SsidManager::GetInstance().Clear();
             Settings wifi_settings("wifi", true);
             wifi_settings.EraseAll();
-            ESP_LOGI(TAG, "factoryReset wiped wifi, entering config mode");
-            if (Board::GetInstance().GetBoardType() == "wifi") {
-                static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
-            } else {
-                Reboot();
-            }
+            ESP_LOGI(TAG, "factoryReset wiped wifi, rebooting into config mode");
+            Reboot();
         });
     }
 }
@@ -813,6 +853,11 @@ void Application::ReportDeviceUplink(const char* report_type, const char* event_
     }
     auto reported = cJSON_Parse(Board::GetInstance().GetDeviceStatusJson().c_str());
     if (reported != nullptr) {
+        std::string pairing_session_id;
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+        pairing_session_id = YgSoulBleProvisioning::GetInstance().GetPairingSessionId();
+#endif
+        cJSON_AddStringToObject(reported, "pairingSessionId", pairing_session_id.c_str());
         cJSON_AddItemToObject(payload, "reported", reported);
     }
     auto text = cJSON_PrintUnformatted(response);
@@ -825,6 +870,11 @@ void Application::ReportDeviceUplink(const char* report_type, const char* event_
         cJSON_free(text);
     }
     cJSON_Delete(response);
+}
+
+void Application::ReportDeviceTelemetry() {
+    ESP_LOGI(TAG, "Reporting telemetry after local control");
+    ReportDeviceUplink("telemetry");
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -912,15 +962,19 @@ void Application::HandleToggleChatEvent() {
     }
 
     if (!protocol_) {
-        ESP_LOGE(TAG, "Protocol not initialized");
+        ESP_LOGW(TAG, "Protocol not ready, start activation");
+        StartActivationIfNeeded();
         return;
     }
 
     if (state == kDeviceStateIdle) {
-        ESP_LOGI(TAG, "Standby ignores button chat; wait for wake word");
+        ESP_LOGI(TAG, "BOOT starts conversation from standby");
+        EnterConversationListening("在呢，可以正常实时拾音对话！");
         return;
-    } else if (state == kDeviceStateSpeaking) {
+    }
+    if (state == kDeviceStateListening || state == kDeviceStateSpeaking || state == kDeviceStateConnecting) {
         AbortSpeaking(kAbortReasonNone);
+        EnterStandby();
     }
 }
 
@@ -1008,6 +1062,10 @@ void Application::HandleWakeWordDetectedEvent() {
     }
 
     if (state == kDeviceStateIdle) {
+        // CRITICAL-RUNTIME-CONTRACT: retained standby WebSocket skips Connecting
+        // and enters listening in this turn. Do not insert a reconnect here.
+        voice_dismissed_ = false;
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         audio_service_.EncodeWakeWord();
         auto detected = audio_service_.GetLastWakeWord();
         if (!protocol_->IsAudioChannelOpened()) {
@@ -1266,10 +1324,9 @@ void Application::EnterStandby() {
     ESP_LOGI(TAG, "Enter standby, wake word only");
     voice_dismissed_ = true;
     if (protocol_ != nullptr) {
+        // CRITICAL-RUNTIME-CONTRACT: standby/super-power-save changes only audio and
+        // display state. Never close the WebSocket here: wake word must resume directly.
         protocol_->SendStopListening();
-        if (protocol_->IsAudioChannelOpened()) {
-            protocol_->CloseAudioChannel();
-        }
     }
     SetDeviceState(kDeviceStateIdle);
     auto& board = Board::GetInstance();
@@ -1279,8 +1336,10 @@ void Application::EnterStandby() {
 }
 
 void Application::EnterVoiceDismissed() {
-    ESP_LOGI(TAG, "Voice dismissed, enter standby");
-    EnterStandby();
+    // Keep the audio channel alive until and after acknowledgement TTS; EnterStandby()
+    // intentionally preserves the WebSocket for direct wake-word resume.
+    ESP_LOGI(TAG, "Voice dismissed, wait for acknowledgement TTS");
+    voice_dismissed_ = true;
 }
 
 void Application::ListenForPairingCommand() {

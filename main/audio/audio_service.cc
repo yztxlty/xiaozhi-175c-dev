@@ -498,7 +498,12 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
         timestamp_queue_.pop_front();
     }
 
-    audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
+    // Keep AFE fetching even if the server side stops consuming audio. Waiting
+    // here deadlocks the audio processor and leaves the UI in "listening".
+    if (audio_encode_queue_.size() >= MAX_ENCODE_TASKS_IN_QUEUE) {
+        ESP_LOGD(TAG, "Audio encoder queue full, dropping stale audio frame");
+        return;
+    }
     audio_encode_queue_.push_back(std::move(task));
     audio_queue_cv_.notify_all();
 }
@@ -548,6 +553,9 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
 
 void AudioService::EnableWakeWordDetection(bool enable) {
     if (!wake_word_) {
+        if (enable) {
+            ESP_LOGW(TAG, "Wake word detector is not loaded");
+        }
         return;
     }
 

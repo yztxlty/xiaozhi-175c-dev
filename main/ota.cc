@@ -13,6 +13,7 @@
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
 #include <esp_heap_caps.h>
+#include <mbedtls/sha256.h>
 #ifdef SOC_HMAC_SUPPORTED
 #include <esp_hmac.h>
 #endif
@@ -21,6 +22,7 @@
 #include <vector>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 
 #define TAG "Ota"
 
@@ -185,6 +187,23 @@ esp_err_t Ota::CheckVersion() {
         ESP_LOGI(TAG, "No websocket section found!");
     }
 
+    cJSON *management = cJSON_GetObjectItem(root, "management");
+    if (cJSON_IsObject(management)) {
+        Settings settings("management", true);
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, management) {
+            if (cJSON_IsString(item)) {
+                if (settings.GetString(item->string) != item->valuestring) {
+                    settings.SetString(item->string, item->valuestring);
+                }
+            } else if (cJSON_IsNumber(item)) {
+                if (settings.GetInt(item->string) != item->valueint) {
+                    settings.SetInt(item->string, item->valueint);
+                }
+            }
+        }
+    }
+
     has_server_time_ = false;
     cJSON *server_time = cJSON_GetObjectItem(root, "server_time");
     if (cJSON_IsObject(server_time)) {
@@ -220,6 +239,14 @@ esp_err_t Ota::CheckVersion() {
         cJSON *url = cJSON_GetObjectItem(firmware, "url");
         if (cJSON_IsString(url)) {
             firmware_url_ = url->valuestring;
+        }
+        cJSON *sha256 = cJSON_GetObjectItem(firmware, "sha256");
+        if (cJSON_IsString(sha256)) {
+            firmware_sha256_ = sha256->valuestring;
+        }
+        cJSON *report_url = cJSON_GetObjectItem(firmware, "reportUrl");
+        if (cJSON_IsString(report_url)) {
+            report_url_ = report_url->valuestring;
         }
 
         if (cJSON_IsString(version) && cJSON_IsString(url)) {
@@ -264,7 +291,7 @@ void Ota::MarkCurrentVersionValid() {
     }
 }
 
-bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback) {
+bool Ota::Upgrade(const std::string& firmware_url, const std::string& expected_sha256, std::function<void(int progress, size_t speed)> callback) {
     ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);
@@ -305,12 +332,20 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     size_t buffer_offset = 0;  // Current data size in buffer
     size_t total_read = 0, recent_read = 0;
     auto last_calc_time = esp_timer_get_time();
+    mbedtls_sha256_context sha256;
+    mbedtls_sha256_init(&sha256);
+    mbedtls_sha256_starts(&sha256, 0);
     while (true) {
+        size_t read_offset = buffer_offset;
         int ret = http->Read(buffer + buffer_offset, PAGE_SIZE - buffer_offset);
         if (ret < 0) {
             ESP_LOGE(TAG, "Failed to read HTTP data: %s", esp_err_to_name(ret));
+            mbedtls_sha256_free(&sha256);
             heap_caps_free(buffer);
             return false;
+        }
+        if (ret > 0) {
+            mbedtls_sha256_update(&sha256, reinterpret_cast<const unsigned char*>(buffer + read_offset), ret);
         }
 
         // Calculate speed and progress every second
@@ -336,6 +371,7 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
                 if (esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle)) {
                     esp_ota_abort(update_handle);
                     ESP_LOGE(TAG, "Failed to begin OTA");
+                    mbedtls_sha256_free(&sha256);
                     heap_caps_free(buffer);
                     return false;
                 }
@@ -352,6 +388,7 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(err));
                 esp_ota_abort(update_handle);
+                mbedtls_sha256_free(&sha256);
                 heap_caps_free(buffer);
                 return false;
             }
@@ -365,6 +402,23 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     }
     http->Close();
     heap_caps_free(buffer);
+
+    unsigned char digest[32];
+    mbedtls_sha256_finish(&sha256, digest);
+    mbedtls_sha256_free(&sha256);
+    if (!expected_sha256.empty()) {
+        char digest_hex[65] = {0};
+        for (size_t i = 0; i < sizeof(digest); ++i) {
+            snprintf(digest_hex + i * 2, sizeof(digest_hex) - i * 2, "%02x", digest[i]);
+        }
+        auto expected = expected_sha256;
+        std::transform(expected.begin(), expected.end(), expected.begin(), [](unsigned char ch) { return std::tolower(ch); });
+        if (expected != digest_hex) {
+            ESP_LOGE(TAG, "Firmware SHA-256 mismatch");
+            esp_ota_abort(update_handle);
+            return false;
+        }
+    }
 
     esp_err_t err = esp_ota_end(update_handle);
     if (err != ESP_OK) {
@@ -387,7 +441,60 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
 }
 
 bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback) {
-    return Upgrade(firmware_url_, callback);
+    return Upgrade(firmware_url_, firmware_sha256_, callback);
+}
+
+bool Ota::ReportProgress(const std::string& status, int progress, const std::string& description) {
+    if (report_url_.empty()) {
+        return false;
+    }
+    auto http = SetupHttp();
+    auto payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "status", status.c_str());
+    cJSON_AddNumberToObject(payload, "progress", progress);
+    cJSON_AddStringToObject(payload, "description", description.c_str());
+    cJSON_AddStringToObject(payload, "module", "MCU");
+    auto text = cJSON_PrintUnformatted(payload);
+    http->SetContent(text == nullptr ? "{}" : text);
+    if (text != nullptr) {
+        cJSON_free(text);
+    }
+    cJSON_Delete(payload);
+    if (!http->Open("POST", report_url_)) {
+        ESP_LOGW(TAG, "Failed to report OTA progress");
+        return false;
+    }
+    auto code = http->GetStatusCode();
+    http->Close();
+    return code >= 200 && code < 300;
+}
+
+void Ota::PersistPendingUpgrade() {
+    if (report_url_.empty() || firmware_version_.empty()) {
+        return;
+    }
+    Settings settings("ota_report", true);
+    settings.SetString("url", report_url_);
+    settings.SetString("version", firmware_version_);
+}
+
+void Ota::ConfirmPendingUpgrade() {
+    current_version_ = esp_app_get_description()->version;
+    Settings saved("ota_report", false);
+    auto url = saved.GetString("url");
+    auto version = saved.GetString("version");
+    if (url.empty() || version != current_version_) {
+        return;
+    }
+    auto original_url = report_url_;
+    report_url_ = url;
+    bool reported = ReportProgress("SUCCEEDED", 100, "启动确认目标版本成功");
+    report_url_ = original_url;
+    if (reported) {
+        Settings writable("ota_report", true);
+        writable.EraseKey("url");
+        writable.EraseKey("version");
+    }
 }
 
 

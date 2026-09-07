@@ -14,6 +14,7 @@
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <cbin_font.h>
+#include <cstdint>
 
 
 #define TAG "Assets"
@@ -62,6 +63,46 @@ void Assets::UnApplyPartition() {
     if (strategy_) {
         strategy_->UnApplyPartition(this);
     }
+}
+
+size_t Assets::AlignUp(size_t value, size_t align, size_t cap) {
+    if (align == 0) {
+        return value > cap ? cap : value;
+    }
+    size_t aligned = (value + align - 1) / align * align;
+    return aligned > cap ? cap : aligned;
+}
+
+size_t Assets::ScanTransientOccupancy(size_t keep) const {
+    if (partition_ == nullptr) {
+        return 0;
+    }
+    const size_t sector = esp_partition_get_main_flash_sector_size();
+    if (sector == 0) {
+        return 0;
+    }
+    size_t start = AlignUp(keep, sector, partition_->size);
+    if (start >= partition_->size) {
+        return 0;
+    }
+    size_t occupied = 0;
+    uint8_t probe[64];
+    for (size_t offset = start; offset + sector <= partition_->size; offset += sector) {
+        bool empty = false;
+        if (esp_partition_read(partition_, offset, probe, sizeof(probe)) == ESP_OK) {
+            empty = true;
+            for (size_t i = 0; i < sizeof(probe); ++i) {
+                if (probe[i] != 0xFF) {
+                    empty = false;
+                    break;
+                }
+            }
+        }
+        if (!empty) {
+            occupied += sector;
+        }
+    }
+    return occupied;
 }
 
 bool Assets::GetAssetData(const std::string& name, void*& ptr, size_t& size) {
@@ -129,35 +170,56 @@ uint32_t Assets::LvglStrategy::CalculateChecksum(const char* data, uint32_t leng
 
 bool Assets::LvglStrategy::InitializePartition(Assets* assets) {
     assets->partition_valid_ = false;
+    assets->pack_layout_known_ = false;
+    assets->pack_valid_ = false;
+    assets->used_size_ = 0;
+    assets->transient_size_ = 0;
     assets_.clear();
 
     if (!Assets::FindPartition(assets)) {
         return false;
     }
-
-    int free_pages = spi_flash_mmap_get_free_pages(SPI_FLASH_MMAP_DATA);
-    uint32_t storage_size = free_pages * 64 * 1024;
-    ESP_LOGI(TAG, "The storage free size is %ld KB", storage_size / 1024);
-    ESP_LOGI(TAG, "The partition size is %ld KB", assets->partition_->size / 1024);
-    if (storage_size < assets->partition_->size) {
-        ESP_LOGE(TAG, "The free size %ld KB is less than assets partition required %ld KB", storage_size / 1024, assets->partition_->size / 1024);
-        return false;
-    }
-
-    esp_err_t err = esp_partition_mmap(assets->partition_, 0, assets->partition_->size, ESP_PARTITION_MMAP_DATA, (const void**)&mmap_root_, &mmap_handle_);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mmap assets partition: %s", esp_err_to_name(err));
-        return false;
-    }
-
+    assets->pack_layout_known_ = true;
     assets->partition_valid_ = true;
 
-    uint32_t stored_files = *(uint32_t*)(mmap_root_ + 0);
-    uint32_t stored_chksum = *(uint32_t*)(mmap_root_ + 4);
-    uint32_t stored_len = *(uint32_t*)(mmap_root_ + 8);
+    uint32_t header[3] = {0, 0, 0};
+    esp_err_t err = esp_partition_read(assets->partition_, 0, header, sizeof(header));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read assets header: %s", esp_err_to_name(err));
+        assets->transient_size_ = assets->ScanTransientOccupancy(0);
+        return false;
+    }
+    uint32_t stored_files = header[0];
+    uint32_t stored_chksum = header[1];
+    uint32_t stored_len = header[2];
 
     if (stored_len > assets->partition_->size - 12) {
         ESP_LOGD(TAG, "The stored_len (0x%lx) is greater than the partition size (0x%lx) - 12", stored_len, assets->partition_->size);
+        assets->transient_size_ = assets->ScanTransientOccupancy(0);
+        ESP_LOGI(TAG, "Assets pack invalid, transient=%u free=%u total=%u",
+                 (unsigned)assets->transient_size_, (unsigned)assets->GetFreeSpace(),
+                 (unsigned)assets->GetTotalSize());
+        return false;
+    }
+
+    const size_t pack_size = stored_len + 12;
+    const size_t mmap_page = 64 * 1024;
+    size_t mmap_size = Assets::AlignUp(pack_size, mmap_page, assets->partition_->size);
+
+    int free_pages = spi_flash_mmap_get_free_pages(SPI_FLASH_MMAP_DATA);
+    uint32_t storage_size = free_pages * mmap_page;
+    ESP_LOGI(TAG, "The storage free size is %ld KB", storage_size / 1024);
+    ESP_LOGI(TAG, "The partition size is %ld KB, mmap size is %u KB", assets->partition_->size / 1024, (unsigned)(mmap_size / 1024));
+    if (storage_size < mmap_size) {
+        ESP_LOGE(TAG, "The free size %ld KB is less than assets mmap required %u KB", storage_size / 1024, (unsigned)(mmap_size / 1024));
+        assets->transient_size_ = assets->ScanTransientOccupancy(0);
+        return false;
+    }
+
+    err = esp_partition_mmap(assets->partition_, 0, mmap_size, ESP_PARTITION_MMAP_DATA, (const void**)&mmap_root_, &mmap_handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mmap assets partition: %s", esp_err_to_name(err));
+        assets->transient_size_ = assets->ScanTransientOccupancy(0);
         return false;
     }
 
@@ -168,10 +230,19 @@ bool Assets::LvglStrategy::InitializePartition(Assets* assets) {
 
     if (calculated_checksum != stored_chksum) {
         ESP_LOGE(TAG, "The calculated checksum (0x%lx) does not match the stored checksum (0x%lx)", calculated_checksum, stored_chksum);
+        UnApplyPartition(assets);
+        assets->partition_valid_ = true;
+        assets->pack_layout_known_ = true;
+        assets->transient_size_ = assets->ScanTransientOccupancy(0);
+        ESP_LOGI(TAG, "Assets checksum invalid, transient=%u free=%u total=%u",
+                 (unsigned)assets->transient_size_, (unsigned)assets->GetFreeSpace(),
+                 (unsigned)assets->GetTotalSize());
         return false;
     }
 
     checksum_valid_ = true;
+    assets->pack_valid_ = true;
+    assets->used_size_ = pack_size;
 
     for (uint32_t i = 0; i < stored_files; i++) {
         auto item = (const mmap_assets_table*)(mmap_root_ + 12 + i * sizeof(mmap_assets_table));
@@ -181,6 +252,10 @@ bool Assets::LvglStrategy::InitializePartition(Assets* assets) {
         };
         assets_[item->asset_name] = asset;
     }
+    assets->transient_size_ = assets->ScanTransientOccupancy(mmap_size);
+    ESP_LOGI(TAG, "Assets pack=%u transient=%u free=%u total=%u",
+             (unsigned)assets->used_size_, (unsigned)assets->transient_size_,
+             (unsigned)assets->GetFreeSpace(), (unsigned)assets->GetTotalSize());
     return checksum_valid_;
 }
 
@@ -556,5 +631,80 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
         return false;
     }
 
+    return true;
+}
+
+bool Assets::PurgeTransient() {
+    if (partition_ == nullptr) {
+        ESP_LOGE(TAG, "clearStorage: no assets partition");
+        return false;
+    }
+    const size_t sector = esp_partition_get_main_flash_sector_size();
+    if (sector == 0) {
+        ESP_LOGE(TAG, "clearStorage: invalid flash sector size");
+        return false;
+    }
+    if (!pack_layout_known_) {
+        ESP_LOGW(TAG, "clearStorage: assets layout unknown, skip flash erase");
+        return true;
+    }
+
+    const size_t mmap_page = 64 * 1024;
+    const bool unmap_first = !pack_valid_;
+    size_t erase_start = pack_valid_
+        ? AlignUp(used_size_, mmap_page, partition_->size)
+        : 0;
+
+    ESP_LOGI(TAG, "clearStorage before pack_valid=%d used=%u transient=%u free=%u total=%u erase_start=%u",
+             (int)pack_valid_, (unsigned)used_size_, (unsigned)transient_size_,
+             (unsigned)GetFreeSpace(), (unsigned)GetTotalSize(), (unsigned)erase_start);
+
+    if (erase_start >= partition_->size) {
+        ESP_LOGI(TAG, "clearStorage: no reclaimable tail");
+        return true;
+    }
+
+    if (unmap_first) {
+        UnApplyPartition();
+    }
+
+    size_t erased = 0;
+    uint8_t probe[64];
+    for (size_t offset = erase_start; offset + sector <= partition_->size; offset += sector) {
+        bool empty = false;
+        if (esp_partition_read(partition_, offset, probe, sizeof(probe)) == ESP_OK) {
+            empty = true;
+            for (size_t i = 0; i < sizeof(probe); ++i) {
+                if (probe[i] != 0xFF) {
+                    empty = false;
+                    break;
+                }
+            }
+        }
+        if (empty) {
+            continue;
+        }
+        esp_err_t err = esp_partition_erase_range(partition_, offset, sector);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "clearStorage erase failed at %u: %s", (unsigned)offset, esp_err_to_name(err));
+            if (unmap_first) {
+                InitializePartition();
+            } else {
+                transient_size_ = ScanTransientOccupancy(erase_start);
+            }
+            return false;
+        }
+        erased += sector;
+    }
+
+    if (unmap_first) {
+        InitializePartition();
+    } else {
+        transient_size_ = ScanTransientOccupancy(erase_start);
+    }
+
+    ESP_LOGI(TAG, "clearStorage after used=%u transient=%u free=%u erased=%u",
+             (unsigned)used_size_, (unsigned)transient_size_,
+             (unsigned)GetFreeSpace(), (unsigned)erased);
     return true;
 }

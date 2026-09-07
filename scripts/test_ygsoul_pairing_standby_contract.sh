@@ -27,14 +27,15 @@ grep -q 'EnsureAdvertising' "$app"
 grep -q 'EnterStandby' "$app"
 ! perl -0ne 'exit !/void Application::HandleActivationDoneEvent\(\) \{.*?EnterConversationListening/s' "$app"
 
-# Standby: wake word only; dismiss closes audio so cloud VAD cannot barge in.
-perl -0ne 'exit !/void Application::EnterStandby\(\) \{.*?CloseAudioChannel\(\);.*?EnableWakeWordDetection\(true\);/s' "$app"
-grep -q 'Standby ignores button chat' "$app"
+# Standby retains the WebSocket and only keeps wake-word detection active.
+perl -0ne 'exit !/void Application::EnterStandby\(\) \{.*?EnableWakeWordDetection\(true\);/s' "$app"
+! perl -0ne 'exit 0 if /void Application::EnterStandby\(\) \{.*?CloseAudioChannel\(\);/s; exit 1' "$app"
+grep -q 'BOOT starts conversation from standby' "$app"
 
 # Super power save after 1 minute standby; function key returns to standby.
-grep -q 'seconds_to_sleep = 60\|PowerSaveTimer(-1, 60' "$board"
+grep -q 'GetAutoSleepMinutes() \* 60\|PowerSaveTimer(-1, 60' "$board"
 grep -q 'EnterSuperPowerSave' "$board"
-grep -q 'EnableWakeWordDetection(false)' "$board"
+grep -q 'EnableWakeWordDetection(true)' "$board"
 grep -q 'ExitSuperPowerSave' "$board"
 
 echo "YGSoul pairing/standby contract passed"
