@@ -165,6 +165,28 @@ def test_pairing_entry_keeps_the_existing_wifi_session():
     assert "WifiManager::GetInstance().StopStation();" not in button_entry
 
 
+def test_pairing_can_preempt_an_active_conversation_and_switch_to_logo():
+    machine = _read("main/device_state_machine.cc")
+    app = _read("main/application.cc")
+    wifi = _read("main/boards/common/wifi_board.cc")
+    ble = _read("main/boards/common/ygsoul_ble_provisioning.cc")
+    display = _read("main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc")
+
+    listening = _slice(machine, "case kDeviceStateListening:", "case kDeviceStateSpeaking:")
+    speaking = _slice(machine, "case kDeviceStateSpeaking:", "case kDeviceStateFatalError:")
+    start = _slice(wifi, "void WifiBoard::StartWifiConfigMode()", "void WifiBoard::EnterWifiConfigMode()")
+    emotion = _slice(display, "virtual void SetEmotion(const char* emotion) override", "virtual void SetStatus(const char* status) override")
+
+    assert "to == kDeviceStateWifiConfiguring" in listening
+    assert "to == kDeviceStateWifiConfiguring" in speaking
+    assert "Application::GetInstance().Schedule" in start
+    assert "YgSoulBleProvisioning::GetInstance().Start()" in start
+    assert "kDeviceStateWifiConfiguring" in emotion
+    assert "ShowYGSoulBootLogo();" in emotion
+    assert "Voice command: enter wifi config" in app
+    assert "ESP_ERROR_CHECK(esp_bt_controller_mem_release" not in ble
+
+
 def test_pairing_completion_returns_to_standby_without_rebooting():
     wifi = _read("main/boards/common/wifi_board.cc")
     ble = _read("main/boards/common/ygsoul_ble_provisioning.cc")
@@ -177,7 +199,7 @@ def test_pairing_completion_returns_to_standby_without_rebooting():
     assert "Application::GetInstance().EnterStandby();" in exit_mode
 
 
-def test_pairing_starts_ble_in_the_original_synchronous_path():
+def test_pairing_starts_ble_after_conversation_audio_is_released():
     app = _read("main/application.cc")
     wifi = _read("main/boards/common/wifi_board.cc")
     start = _slice(wifi, "void WifiBoard::StartWifiConfigMode()", "void WifiBoard::EnterWifiConfigMode()")
@@ -185,7 +207,7 @@ def test_pairing_starts_ble_in_the_original_synchronous_path():
     state_changed = _slice(app, "case kDeviceStateWifiConfiguring:", "default:")
 
     assert "YgSoulBleProvisioning::GetInstance().Start()" in ble_start
-    assert "Application::GetInstance().Schedule" not in ble_start
+    assert "Application::GetInstance().Schedule" in ble_start
     assert "EnableVoiceProcessing(false);" in state_changed
     assert "EnableWakeWordDetection(true);" in state_changed
 
@@ -200,7 +222,8 @@ if __name__ == "__main__":
     test_wake_words_are_youguang_not_xiaozhi()
     test_protocol_can_request_exact_tts_prompt()
     test_audio_backpressure_drops_stale_input_without_blocking_afe()
-    test_pairing_entry_keeps_the_last_known_good_wifi_state()
+    test_pairing_entry_keeps_the_existing_wifi_session()
+    test_pairing_can_preempt_an_active_conversation_and_switch_to_logo()
     test_pairing_completion_returns_to_standby_without_rebooting()
-    test_pairing_starts_ble_in_the_original_synchronous_path()
+    test_pairing_starts_ble_after_conversation_audio_is_released()
     print("PASS: conversation listen flow")

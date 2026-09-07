@@ -111,7 +111,8 @@ esp_err_t YgSoulBleProvisioning::Start() {
     if (started_) return ESP_OK;
     parser_ = new ygsoul::ble::BleFrameParser();
     g_service = this;
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+    const auto release_result = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+    if (release_result != ESP_OK && release_result != ESP_ERR_INVALID_STATE) return release_result;
     esp_bt_controller_config_t controller_config = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     esp_err_t result = esp_bt_controller_init(&controller_config);
     if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) return result;

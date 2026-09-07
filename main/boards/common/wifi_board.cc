@@ -190,13 +190,22 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
 
 void WifiBoard::StartWifiConfigMode() {
     in_config_mode_ = true;
-    // Transition to wifi configuring state
-    Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
-#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
-    if (YgSoulBleProvisioning::GetInstance().Start() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start YGSoul BLE provisioning");
+    if (!Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring)) {
         in_config_mode_ = false;
+        ESP_LOGE(TAG, "Unable to enter Wi-Fi config state");
+        return;
     }
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+    // Run after the state handler releases conversation audio memory.
+    Application::GetInstance().Schedule([this]() {
+        if (Application::GetInstance().GetDeviceState() != kDeviceStateWifiConfiguring) {
+            return;
+        }
+        if (YgSoulBleProvisioning::GetInstance().Start() != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start YGSoul BLE provisioning");
+            in_config_mode_ = false;
+        }
+    });
 #elif CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
     auto& wifi_manager = WifiManager::GetInstance();
 

@@ -89,14 +89,16 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
                    to == kDeviceStateListening;
 
         case kDeviceStateListening:
-            // Can go to speaking or idle
+            // Pairing must preempt an active conversation.
             return to == kDeviceStateSpeaking ||
-                   to == kDeviceStateIdle;
+                   to == kDeviceStateIdle ||
+                   to == kDeviceStateWifiConfiguring;
 
         case kDeviceStateSpeaking:
-            // Can go to listening or idle
+            // Pairing must preempt an active conversation.
             return to == kDeviceStateListening ||
-                   to == kDeviceStateIdle;
+                   to == kDeviceStateIdle ||
+                   to == kDeviceStateWifiConfiguring;
 
         case kDeviceStateFatalError:
             // Cannot transition out of fatal error

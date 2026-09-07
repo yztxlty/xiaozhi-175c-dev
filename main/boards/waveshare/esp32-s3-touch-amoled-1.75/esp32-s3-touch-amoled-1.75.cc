@@ -383,6 +383,10 @@ public:
         }
         DisplayLockGuard lock(this);
         const auto state = Application::GetInstance().GetDeviceState();
+        if (state == kDeviceStateWifiConfiguring) {
+            ShowYGSoulBootLogo();
+            return;
+        }
         const bool conversation_ui =
             state == kDeviceStateIdle ||
             state == kDeviceStateConnecting ||
