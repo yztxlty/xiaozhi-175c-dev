@@ -30,6 +30,7 @@ public:
     void StartWaiting();
     Result Complete(const std::string& ssid);
     bool CancelPending();
+    void RestoreCompleted(const std::string& session_id);
     std::string SessionId() const;
 
 private:

@@ -30,7 +30,9 @@
 
 static const char *TAG = "WifiBoard";
 static constexpr char kPairingSettingsNamespace[] = "wifi";
-static constexpr char kPairingRebootPendingKey[] = "pairing_reboot_pending";
+static constexpr char kPairingRebootPendingKey[] = "pair_pending";
+static_assert(sizeof(kPairingRebootPendingKey) <= NVS_KEY_NAME_MAX_SIZE,
+              "配网标记必须符合 NVS 键长度限制");
 
 // Connection timeout in seconds
 static constexpr int CONNECT_TIMEOUT_SEC = 60;
@@ -148,8 +150,9 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
 #endif
 #ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
             YgSoulBleProvisioning::GetInstance().OnNetworkEvent(event, data);
-#endif
+#else
             in_config_mode_ = false;
+#endif
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
             break;
         case NetworkEvent::Scanning:
@@ -267,8 +270,10 @@ void WifiBoard::EnterWifiConfigMode() {
 
     if (WifiManager::GetInstance().IsConnected()) {
         ESP_LOGI(TAG, "Restarting into BLE pairing before active audio reserves SRAM");
-        Settings pairing(kPairingSettingsNamespace, true);
-        pairing.SetBool(kPairingRebootPendingKey, true);
+        {
+            Settings pairing(kPairingSettingsNamespace, true);
+            pairing.SetBool(kPairingRebootPendingKey, true);
+        } // Settings 析构时提交 NVS，必须早于不会返回的 Reboot。
         Application::GetInstance().Reboot();
         return;
     }
@@ -311,6 +316,13 @@ void WifiBoard::ExitWifiConfigMode() {
 #endif
     in_config_mode_ = false;
     Application::GetInstance().EnterStandby();
+    // 成功回执可能晚于联网事件处理。退出配网后重新通知应用层，
+    // 保证先释放 BLE，再初始化联网协议；未联网的显式退出恢复旧 Wi-Fi。
+    if (WifiManager::GetInstance().IsConnected()) {
+        if (network_event_callback_) network_event_callback_(NetworkEvent::Connected, "");
+    } else {
+        TryWifiConnect();
+    }
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {
@@ -388,11 +400,21 @@ std::string WifiBoard::GetDeviceStatusJson() {
     Settings companion("companion", false);
     auto active_role_id = companion.GetString("active_role");
     auto voice_profile_id = companion.GetString("voice_profile");
+    auto role_visual_resource_id = companion.GetString("role_res");
+    int configuration_revision = companion.GetInt("cfg_rev", 0);
+    int role_visual_version = companion.GetInt("role_ver", 0);
+    cJSON_AddBoolToObject(root, "showAsrText", companion.GetInt("show_asr", 1) != 0);
+    cJSON_AddBoolToObject(root, "showTtsText", companion.GetInt("show_tts", 1) != 0);
     if (!active_role_id.empty()) {
         cJSON_AddStringToObject(root, "activeRoleId", active_role_id.c_str());
     }
     if (!voice_profile_id.empty()) {
         cJSON_AddStringToObject(root, "voiceProfileId", voice_profile_id.c_str());
+    }
+    if (configuration_revision > 0) {
+        cJSON_AddNumberToObject(root, "configurationRevision", configuration_revision);
+        cJSON_AddStringToObject(root, "roleVisualResourceId", role_visual_resource_id.c_str());
+        cJSON_AddNumberToObject(root, "roleVisualVersion", role_visual_version);
     }
 
     // Audio speaker

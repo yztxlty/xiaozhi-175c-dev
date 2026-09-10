@@ -4,17 +4,24 @@
 
 namespace ygsoul::ble {
 
+namespace {
+bool IsValidSessionId(const std::string& value) {
+    if (value.size() != 36) return false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        const bool separator = i == 8 || i == 13 || i == 18 || i == 23;
+        if (separator ? c != '-' : !((c >= '0' && c <= '9') ||
+                                      (c >= 'a' && c <= 'f') ||
+                                      (c >= 'A' && c <= 'F'))) return false;
+    }
+    return true;
+}
+}  // namespace
+
 void PairingReceipt::Begin(const std::string& token, const std::string& ssid) {
     std::string session_id;
-    if (token.size() > 37 && token[36] == '.') {
-        bool valid = true;
-        for (size_t i = 0; i < 36; ++i) {
-            const char c = token[i];
-            const bool separator = i == 8 || i == 13 || i == 18 || i == 23;
-            valid &= separator ? c == '-' :
-                (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-        }
-        if (valid) session_id = token.substr(0, 36);
+    if (token.size() > 37 && token[36] == '.' && IsValidSessionId(token.substr(0, 36))) {
+        session_id = token.substr(0, 36);
     }
     std::lock_guard<std::mutex> lock(mutex_);
     target_ssid_ = ssid;
@@ -46,6 +53,12 @@ bool PairingReceipt::CancelPending() {
     target_ssid_.clear();
     pending_session_id_.clear();
     return was_waiting;
+}
+
+void PairingReceipt::RestoreCompleted(const std::string& session_id) {
+    if (!IsValidSessionId(session_id)) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    completed_session_id_ = session_id;
 }
 
 std::string PairingReceipt::SessionId() const {

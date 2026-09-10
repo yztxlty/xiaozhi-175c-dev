@@ -42,11 +42,20 @@ int main() {
     assert(idle.activations == 1);
     // 初始化尚未建立协议就断网，不应解引用空指针。
     idle.HandleNetworkDisconnectedEvent();
-    for (auto state : {kDeviceStateStarting, kDeviceStateWifiConfiguring}) {
+    for (auto state : {kDeviceStateStarting}) {
         Application fresh{state, nullptr, nullptr};
         fresh.HandleNetworkConnectedEvent();
         assert(fresh.activations == 1);
     }
+    // 收到旧 Wi-Fi/迟到联网事件不代表本次配网已成功。
+    Application pairing{kDeviceStateWifiConfiguring, nullptr, nullptr};
+    pairing.HandleNetworkConnectedEvent();
+    assert(pairing.state == kDeviceStateWifiConfiguring);
+    assert(pairing.activations == 0);
+    // 成功回执退出配网后再次派发联网事件，才允许初始化协议。
+    pairing.state = kDeviceStateIdle;
+    pairing.HandleNetworkConnectedEvent();
+    assert(pairing.activations == 1);
     // 已验收的待命/聆听/说话在重连时不得重新初始化或改变状态。
     Protocol existing;
     for (auto state : {kDeviceStateIdle, kDeviceStateListening, kDeviceStateSpeaking}) {

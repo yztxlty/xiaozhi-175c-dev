@@ -10,6 +10,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "device_content/role_visual_store.h"
 #include "ssid_manager.h"
 #include "ydp_bootstrap.h"
 #include "wifi_board.h"
@@ -76,6 +77,10 @@ void Application::Initialize() {
     // Setup the display
     auto display = board.GetDisplay();
     display->SetupUI();
+    RoleVisualStore::GetInstance().LoadActive();
+    Settings companion_settings("companion", false);
+    show_asr_text_ = companion_settings.GetInt("show_asr", 1) != 0;
+    show_tts_text_ = companion_settings.GetInt("show_tts", 1) != 0;
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
@@ -294,10 +299,7 @@ void Application::HandleNetworkConnectedEvent() {
 #ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
         YgSoulBleProvisioning::GetInstance().EnsureAdvertising();
 #endif
-        if (protocol_ == nullptr) {
-            SetDeviceState(kDeviceStateConnecting);
-            StartActivationIfNeeded();
-        } else {
+        if (protocol_ != nullptr) {
             ReportDeviceUplink("attributes");
             ReportDeviceUplink("telemetry");
             ReportDeviceUplink("event", "device.connected");
@@ -558,6 +560,10 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelClosed([this, &board]() {
+        if (refreshing_role_voice_.exchange(false)) {
+            ESP_LOGI(TAG, "Ignore expected audio close while refreshing role session");
+            return;
+        }
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
@@ -574,6 +580,7 @@ void Application::InitializeProtocol() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
+                tts_display_text_.clear();
                 Schedule([this]() {
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
@@ -593,18 +600,23 @@ void Application::InitializeProtocol() {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
-                    });
+                    if (show_tts_text_) {
+                        tts_display_text_ += text->valuestring;
+                        Schedule([display, message = tts_display_text_]() {
+                            display->SetChatMessage("assistant", message.c_str());
+                        });
+                    }
                 }
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([display, message = std::string(text->valuestring)]() {
-                    display->SetChatMessage("user", message.c_str());
-                });
+                if (show_asr_text_) {
+                    Schedule([display, message = std::string(text->valuestring)]() {
+                        display->SetChatMessage("user", message.c_str());
+                    });
+                }
                 if (IsVoiceDismissCommand(text->valuestring)) {
                     Schedule([this]() { EnterVoiceDismissed(); });
                 } else if (HandleWifiConfigVoiceCommand(text->valuestring)) {
@@ -612,6 +624,27 @@ void Application::InitializeProtocol() {
                 } else if (GetDeviceState() == kDeviceStateWifiConfiguring) {
                     AbortSpeaking(kAbortReasonNone);
                 }
+            }
+        } else if (strcmp(type->valuestring, "opening") == 0) {
+            auto opening_code = cJSON_GetObjectItem(root, "openingCode");
+            if (cJSON_IsString(opening_code) && opening_code->valuestring[0] != '\0' &&
+                strlen(opening_code->valuestring) <= 127) {
+                Settings companion("companion", true);
+                const bool duplicate = companion.GetString("opening_code") == opening_code->valuestring;
+                if (!duplicate) {
+                    // 先持久化再允许云端播报，断线重连也不会重复播放开场白。
+                    companion.SetString("opening_code", opening_code->valuestring);
+                }
+                auto response = cJSON_CreateObject();
+                cJSON_AddStringToObject(response, "type", "opening");
+                cJSON_AddStringToObject(response, "openingCode", opening_code->valuestring);
+                cJSON_AddStringToObject(response, "status", duplicate ? "DUPLICATE" : "READY");
+                auto response_text = cJSON_PrintUnformatted(response);
+                if (response_text != nullptr && protocol_ != nullptr) {
+                    protocol_->SendDeviceMessage(response_text);
+                }
+                cJSON_free(response_text);
+                cJSON_Delete(response);
             }
         } else if (strcmp(type->valuestring, "device.standby") == 0) {
             Schedule([this]() { EnterStandby(); });
@@ -693,12 +726,6 @@ void Application::HandleCustomMessage(const cJSON* root) {
         ESP_LOGW(TAG, "Invalid custom message format: missing payload");
         return;
     }
-    auto display = Board::GetInstance().GetDisplay();
-    auto payload_text = cJSON_PrintUnformatted(payload);
-    Schedule([display, payload_str = std::string(payload_text == nullptr ? "" : payload_text)]() {
-        display->SetChatMessage("system", payload_str.c_str());
-    });
-    cJSON_free(payload_text);
     auto request_id = cJSON_GetObjectItem(payload, "requestId");
     auto command = cJSON_GetObjectItem(payload, "command");
     if (!cJSON_IsString(request_id) || !cJSON_IsString(command)) {
@@ -707,6 +734,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
     auto& board = Board::GetInstance();
     bool succeeded = false;
     bool command_changes_telemetry = false;
+    bool voice_session_refresh_required = false;
     const char* error_code = nullptr;
     if (strcmp(command->valuestring, "setVolume") == 0) {
         auto params = cJSON_GetObjectItem(payload, "params");
@@ -738,14 +766,86 @@ void Application::HandleCustomMessage(const cJSON* root) {
         } else {
             error_code = "invalid_params";
         }
+    } else if (strcmp(command->valuestring, "prepareRoleVisual") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        auto resource_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "resourceId") : nullptr;
+        auto version = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "version") : nullptr;
+        auto url = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "url") : nullptr;
+        auto sha256 = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "sha256") : nullptr;
+        auto bytes = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "bytes") : nullptr;
+        if (cJSON_IsString(resource_id) && cJSON_IsNumber(version) && cJSON_IsString(url) &&
+            cJSON_IsString(sha256) && cJSON_IsNumber(bytes)) {
+            succeeded = RoleVisualStore::GetInstance().Prepare(
+                resource_id->valuestring, version->valueint, url->valuestring,
+                sha256->valuestring, static_cast<size_t>(bytes->valuedouble));
+            if (!succeeded) error_code = "role_visual_prepare_failed";
+        } else {
+            error_code = "invalid_params";
+        }
+    } else if (strcmp(command->valuestring, "commitActiveRole") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        auto role_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "roleId") : nullptr;
+        auto resource_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "roleVisualResourceId") : nullptr;
+        auto resource_version = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "roleVisualVersion") : nullptr;
+        auto revision = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "configurationRevision") : nullptr;
+        auto voice_profile_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "voiceProfileId") : nullptr;
+        auto show_asr_text = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "showAsrText") : nullptr;
+        auto show_tts_text = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "showTtsText") : nullptr;
+        if (cJSON_IsString(role_id) && cJSON_IsString(resource_id) &&
+            cJSON_IsNumber(resource_version) && cJSON_IsNumber(revision)) {
+            succeeded = RoleVisualStore::GetInstance().Commit(
+                role_id->valuestring, resource_id->valuestring,
+                resource_version->valueint, revision->valueint);
+            if (succeeded) {
+                Settings companion("companion", true);
+                if (cJSON_IsString(voice_profile_id)) {
+                    voice_session_refresh_required = companion.GetString("voice_profile") != voice_profile_id->valuestring;
+                    companion.SetString("voice_profile", voice_profile_id->valuestring);
+                }
+                show_asr_text_ = !cJSON_IsBool(show_asr_text) || cJSON_IsTrue(show_asr_text);
+                show_tts_text_ = !cJSON_IsBool(show_tts_text) || cJSON_IsTrue(show_tts_text);
+                companion.SetInt("show_asr", show_asr_text_ ? 1 : 0);
+                companion.SetInt("show_tts", show_tts_text_ ? 1 : 0);
+            }
+            command_changes_telemetry = succeeded;
+            if (!succeeded) error_code = "role_visual_commit_failed";
+        } else {
+            error_code = "invalid_params";
+        }
     } else if (strcmp(command->valuestring, "setActiveRole") == 0) {
         auto params = cJSON_GetObjectItem(payload, "params");
         auto role_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "roleId") : nullptr;
         auto voice_profile_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "voiceProfileId") : nullptr;
+        auto configuration_revision = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "configurationRevision") : nullptr;
+        auto role_visual_resource_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "roleVisualResourceId") : nullptr;
+        auto role_visual_version = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "roleVisualVersion") : nullptr;
+        auto show_asr_text = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "showAsrText") : nullptr;
+        auto show_tts_text = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "showTtsText") : nullptr;
         if (cJSON_IsString(role_id) && role_id->valuestring[0] != '\0'
+                && cJSON_IsNumber(configuration_revision) && configuration_revision->valueint > 0
+                && cJSON_IsString(role_visual_resource_id) && role_visual_resource_id->valuestring[0] != '\0'
+                && cJSON_IsNumber(role_visual_version) && role_visual_version->valueint >= 0) {
+            succeeded = RoleVisualStore::GetInstance().Commit(
+                role_id->valuestring, role_visual_resource_id->valuestring,
+                role_visual_version->valueint, configuration_revision->valueint);
+            if (succeeded) {
+                Settings companion("companion", true);
+                if (cJSON_IsString(voice_profile_id)) {
+                    voice_session_refresh_required = companion.GetString("voice_profile") != voice_profile_id->valuestring;
+                    companion.SetString("voice_profile", voice_profile_id->valuestring);
+                }
+                show_asr_text_ = !cJSON_IsBool(show_asr_text) || cJSON_IsTrue(show_asr_text);
+                show_tts_text_ = !cJSON_IsBool(show_tts_text) || cJSON_IsTrue(show_tts_text);
+                companion.SetInt("show_asr", show_asr_text_ ? 1 : 0);
+                companion.SetInt("show_tts", show_tts_text_ ? 1 : 0);
+            }
+            command_changes_telemetry = succeeded;
+            if (!succeeded) error_code = "role_commit_failed";
+        } else if (cJSON_IsString(role_id) && role_id->valuestring[0] != '\0'
                 && cJSON_IsString(voice_profile_id) && voice_profile_id->valuestring[0] != '\0') {
             Settings companion("companion", true);
             companion.SetString("active_role", role_id->valuestring);
+            voice_session_refresh_required = companion.GetString("voice_profile") != voice_profile_id->valuestring;
             companion.SetString("voice_profile", voice_profile_id->valuestring);
             succeeded = true;
             command_changes_telemetry = true;
@@ -787,6 +887,15 @@ void Application::HandleCustomMessage(const cJSON* root) {
     }
     auto reported = cJSON_Parse(board.GetDeviceStatusJson().c_str());
     if (reported != nullptr) {
+        if (succeeded && strcmp(command->valuestring, "prepareRoleVisual") == 0) {
+            auto params = cJSON_GetObjectItem(payload, "params");
+            auto resource_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "resourceId") : nullptr;
+            auto version = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "version") : nullptr;
+            if (cJSON_IsString(resource_id) && cJSON_IsNumber(version)) {
+                cJSON_AddStringToObject(reported, "preparedRoleVisualResourceId", resource_id->valuestring);
+                cJSON_AddNumberToObject(reported, "preparedRoleVisualVersion", version->valueint);
+            }
+        }
         if (succeeded && strcmp(command->valuestring, "unbind") == 0) {
             cJSON_AddBoolToObject(reported, "unbound", true);
         }
@@ -811,6 +920,9 @@ void Application::HandleCustomMessage(const cJSON* root) {
     if (succeeded && command_changes_telemetry) {
         ReportDeviceUplink("telemetry");
     }
+    if (succeeded && voice_session_refresh_required) {
+        Schedule([this]() { RefreshVoiceSessionAfterRoleChange(); });
+    }
     if (succeeded && strcmp(command->valuestring, "checkOta") == 0) {
         Schedule([this]() {
             ota_ = std::make_unique<Ota>();
@@ -833,6 +945,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
             SsidManager::GetInstance().Clear();
             Settings wifi_settings("wifi", true);
             wifi_settings.EraseAll();
+            RoleVisualStore::GetInstance().Clear();
             WifiManager::GetInstance().StopStation();
             static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
         });
@@ -845,10 +958,38 @@ void Application::HandleCustomMessage(const cJSON* root) {
             SsidManager::GetInstance().Clear();
             Settings wifi_settings("wifi", true);
             wifi_settings.EraseAll();
+            RoleVisualStore::GetInstance().Clear();
             ESP_LOGI(TAG, "factoryReset wiped wifi, rebooting into config mode");
             Reboot();
         });
     }
+}
+
+void Application::RefreshVoiceSessionAfterRoleChange() {
+    if (protocol_ == nullptr || !protocol_->IsAudioChannelOpened()) {
+        return;
+    }
+    const auto state = GetDeviceState();
+    const bool resume_listening = state == kDeviceStateListening || state == kDeviceStateSpeaking;
+    ESP_LOGI(TAG, "Refreshing voice session for committed role");
+    if (state == kDeviceStateSpeaking) {
+        AbortSpeaking(kAbortReasonNone);
+        audio_service_.ResetDecoder();
+    }
+    refreshing_role_voice_.store(true);
+    protocol_->CloseAudioChannel(false);
+    if (!protocol_->OpenAudioChannel()) {
+        refreshing_role_voice_.store(false);
+        SetDeviceState(kDeviceStateIdle);
+        audio_service_.EnableWakeWordDetection(true);
+        ESP_LOGW(TAG, "Role voice session refresh failed; wait for next wake retry");
+        return;
+    }
+    if (resume_listening) {
+        protocol_->SendStartListening(GetDefaultListeningMode());
+        SetListeningMode(GetDefaultListeningMode());
+    }
+    ESP_LOGI(TAG, "Role voice session refreshed");
 }
 
 void Application::ReportDeviceUplink(const char* report_type, const char* event_type) {
@@ -1220,7 +1361,7 @@ void Application::HandleStateChangedEvent() {
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "BLE 配网广播已开启");
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(false);
             break;
         default:
             // Do nothing
@@ -1516,20 +1657,11 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
 }
 
 bool Application::CanEnterSleepMode() {
-    if (GetDeviceState() != kDeviceStateIdle) {
-        return false;
+    const auto state = GetDeviceState();
+    if (state == kDeviceStateListening) {
+        return !audio_service_.IsVoiceDetected();
     }
-
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-        return false;
-    }
-
-    if (!audio_service_.IsIdle()) {
-        return false;
-    }
-
-    // Now it is safe to enter sleep mode
-    return true;
+    return state == kDeviceStateIdle && audio_service_.IsIdle();
 }
 
 void Application::SendMcpMessage(const std::string& payload) {

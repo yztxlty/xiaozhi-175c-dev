@@ -40,6 +40,7 @@ public:
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
+    virtual bool SetRoleImage(const char* path) { return false; }
     virtual void SetupUI() { 
         setup_ui_called_ = true;
     }
@@ -63,17 +64,22 @@ protected:
 
 class DisplayLockGuard {
 public:
-    DisplayLockGuard(Display *display) : display_(display) {
-        if (!display_->Lock(30000)) {
+    DisplayLockGuard(Display *display) : display_(display), locked_(display_->Lock(30000)) {
+        if (!locked_) {
             ESP_LOGE("Display", "Failed to lock display");
         }
     }
     ~DisplayLockGuard() {
-        display_->Unlock();
+        if (locked_) {
+            display_->Unlock();
+        }
     }
+
+    explicit operator bool() const { return locked_; }
 
 private:
     Display *display_;
+    bool locked_;
 };
 
 class NoDisplay : public Display {

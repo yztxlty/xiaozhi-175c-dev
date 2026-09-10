@@ -13,6 +13,7 @@
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "application.h"
+#include "settings.h"
 #include "ssid_manager.h"
 #include "system_info.h"
 #include "wifi_board.h"
@@ -22,6 +23,8 @@
 namespace {
 constexpr char kTag[] = "YGSoulBLE";
 constexpr char kProductKey[] = "ESP32S3";
+constexpr char kPairingReceiptSettingsNamespace[] = "pairing";
+constexpr char kPairingReceiptKey[] = "session_id";
 constexpr uint64_t kWifiConnectTimeoutUs = 45ULL * 1000 * 1000;
 constexpr uint16_t kAppId = 0x42;
 enum AttributeIndex { kService, kWriteDecl, kWriteValue, kNotifyDecl, kNotifyValue, kNotifyCccd, kCount };
@@ -107,6 +110,16 @@ YgSoulBleProvisioning& YgSoulBleProvisioning::GetInstance() {
     return instance;
 }
 
+std::string YgSoulBleProvisioning::GetPairingSessionId() {
+    auto pairing_session_id = pairing_receipt_.SessionId();
+    if (!pairing_session_id.empty()) return pairing_session_id;
+    Settings settings(kPairingReceiptSettingsNamespace, true);
+    pairing_session_id = settings.GetString(kPairingReceiptKey);
+    settings.EraseKey(kPairingReceiptKey);
+    pairing_receipt_.RestoreCompleted(pairing_session_id);
+    return pairing_receipt_.SessionId();
+}
+
 esp_err_t YgSoulBleProvisioning::Start() {
     if (started_) return ESP_OK;
     parser_ = new ygsoul::ble::BleFrameParser();
@@ -149,7 +162,7 @@ esp_err_t YgSoulBleProvisioning::Start() {
 }
 
 void YgSoulBleProvisioning::EnsureAdvertising() {
-    if (!started_ || connected_) {
+    if (!started_ || connected_ || advertising_) {
         return;
     }
     const auto result = esp_ble_gap_start_advertising(&kAdvParams);
@@ -174,7 +187,7 @@ void YgSoulBleProvisioning::Stop() {
     esp_bt_controller_deinit();
     delete parser_;
     parser_ = nullptr;
-    started_ = connected_ = netcfg_started_ = false;
+    started_ = connected_ = advertising_ = netcfg_started_ = false;
     candidate_saved_ = false;
     previous_ssids_.clear();
     gatts_if_ = ESP_GATT_IF_NONE;
@@ -208,11 +221,13 @@ void YgSoulBleProvisioning::GattsEvent(esp_gatts_cb_event_t event, esp_gatt_if_t
             break;
         case ESP_GATTS_CONNECT_EVT:
             g_service->connected_ = true;
+            g_service->advertising_ = false;
             g_service->connection_id_ = param->connect.conn_id;
             break;
         case ESP_GATTS_DISCONNECT_EVT:
             g_service->connected_ = false;
-            esp_ble_gap_start_advertising(&kAdvParams);
+            g_service->advertising_ = false;
+            g_service->EnsureAdvertising();
             break;
         case ESP_GATTS_WRITE_EVT:
             g_service->HandleWrite(param);
@@ -235,6 +250,9 @@ void YgSoulBleProvisioning::GapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_c
         ESP_LOGI(kTag, "start advertising after data: %s",
                  esp_err_to_name(esp_ble_gap_start_advertising(&kAdvParams)));
     } else if (event == ESP_GAP_BLE_ADV_START_COMPLETE_EVT) {
+        if (g_service != nullptr) {
+            g_service->advertising_ = param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS;
+        }
         ESP_LOGI(kTag, "advertising start result: status=%d", param->adv_start_cmpl.status);
     } else if (event == ESP_GAP_BLE_SEC_REQ_EVT) {
         ESP_LOGI(kTag, "security request: %s",
@@ -310,6 +328,7 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
         SendStatus("FAILED", "INVALID_WIFI");
         return;
     }
+    Settings(kPairingReceiptSettingsNamespace, true).EraseKey(kPairingReceiptKey);
     pairing_receipt_.Begin(token, ssid);
     netcfg_started_ = true;
     if (!candidate_saved_) {
@@ -366,6 +385,11 @@ void YgSoulBleProvisioning::OnNetworkEvent(NetworkEvent event, const std::string
             return;
         }
         if (wifi_connect_timeout_ != nullptr) esp_timer_stop(wifi_connect_timeout_);
+        const auto pairing_session_id = pairing_receipt_.SessionId();
+        if (!pairing_session_id.empty()) {
+            Settings(kPairingReceiptSettingsNamespace, true)
+                .SetString(kPairingReceiptKey, pairing_session_id);
+        }
         candidate_saved_ = false;
         previous_ssids_.clear();
         SendStatus("SUCCEEDED");

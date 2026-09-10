@@ -20,6 +20,9 @@ int main() {
     receipt.StartWaiting();
     assert(receipt.Complete("new-wifi") == PairingReceipt::Result::Matched);
     assert(receipt.SessionId() == id);
+    PairingReceipt restored;
+    restored.RestoreCompleted(id);
+    assert(restored.SessionId() == id);
     assert(!receipt.CancelPending()); // 停止 BLE 不得清除成功回执。
     assert(receipt.SessionId() == id);
     assert(receipt.Complete("new-wifi") == PairingReceipt::Result::Ignored);
@@ -67,8 +70,10 @@ int main() {
 
 def test_command_ack_precedes_offline_and_wifi_cleanup():
     source = (ROOT / "main/application.cc").read_text(encoding="utf-8")
+    handler = source.index("void Application::HandleCustomMessage")
+    ack_finished = source.index("cJSON_Delete(response);", handler)
     for command in ("unbind", "factoryReset"):
-        start = source.index(f'if (succeeded && strcmp(command->valuestring, "{command}") == 0) {{', source.index("cJSON_Delete(response);"))
+        start = source.index(f'if (succeeded && strcmp(command->valuestring, "{command}") == 0) {{', ack_finished)
         block = source[start:source.index("\n    }", start)]
         assert 'ReportDeviceUplink("event", "device.offline");' in block
         assert block.index('ReportDeviceUplink("event", "device.offline");') < block.index("Schedule(")
@@ -90,3 +95,14 @@ def test_provisioning_uses_receipt_and_preserves_it_on_stop():
     stop = source.split("void YgSoulBleProvisioning::Stop()", 1)[1].split("\n}", 1)[0]
     assert "pairing_receipt_.CancelPending()" in stop
     assert "pairing_receipt_.Begin" not in stop
+
+
+def test_successful_pairing_receipt_survives_one_unexpected_reboot():
+    source = (ROOT / "main/boards/common/ygsoul_ble_provisioning.cc").read_text(encoding="utf-8")
+    header = (ROOT / "main/boards/common/ygsoul_ble_provisioning.h").read_text(encoding="utf-8")
+    assert 'kPairingReceiptKey' in source
+    assert 'EraseKey(kPairingReceiptKey)' in source
+    assert 'SetString(kPairingReceiptKey, pairing_session_id)' in source
+    assert 'GetString(kPairingReceiptKey)' in source
+    assert 'RestoreCompleted' in source
+    assert 'std::string GetPairingSessionId()' in header

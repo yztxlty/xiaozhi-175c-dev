@@ -7,6 +7,7 @@
 #include <esp_timer.h>
 
 #include <string>
+#include <atomic>
 #include <mutex>
 #include <deque>
 #include <memory>
@@ -144,6 +145,10 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool voice_dismissed_ = false;
+    bool show_asr_text_ = true;
+    bool show_tts_text_ = true;
+    std::string tts_display_text_;
+    std::atomic_bool refreshing_role_voice_{false};
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -168,6 +173,7 @@ private:
     void CheckNewVersion();
     void InitializeProtocol();
     void HandleCustomMessage(const struct cJSON* root);
+    void RefreshVoiceSessionAfterRoleChange();
     void ReportDeviceUplink(const char* report_type, const char* event_type = nullptr);
     void EnterConversationListening(const char* prompt);
     void EnterVoiceDismissed();

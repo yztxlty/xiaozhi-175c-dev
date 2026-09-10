@@ -1,5 +1,6 @@
 #include "wifi_board.h"
 #include "display/lcd_display.h"
+#include "display/lvgl_display/jpg/jpeg_to_image.h"
 #include "esp_lcd_co5300.h"
 #include "assets.h"
 
@@ -27,6 +28,7 @@
 #include <lvgl.h>
 
 #include <array>
+#include <cstdio>
 #include <cstring>
 
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
@@ -106,6 +108,7 @@ private:
     bool ygsoul_mouth_speaking_ = false;
     bool ygsoul_chat_message_is_system_ = true;
     bool ygsoul_assets_ready_ = false;
+    bool custom_role_image_ = false;
     std::unique_ptr<LvglImage> ygsoul_companion_;
     std::array<std::unique_ptr<LvglImage>, YGSOUL_MOUTH_FRAME_COUNT> ygsoul_mouth_frames_;
     lv_obj_t* ygsoul_image_ = nullptr;
@@ -191,17 +194,19 @@ private:
         if (chat_message_label_ == nullptr) {
             return;
         }
-        const auto color = ygsoul_chat_message_is_system_
+        const auto color = ygsoul_chat_message_is_system_ || custom_role_image_
             ? lv_color_white()
             : lv_color_hex(YGSOUL_UI_TEXT);
         lv_obj_set_style_text_color(chat_message_label_, color, 0);
     }
 
     void ApplyYGSoulOverlayStyle() {
-        const auto text = showing_boot_logo_ ? lv_color_white() : lv_color_hex(YGSOUL_UI_TEXT);
+        const bool image_overlay = showing_boot_logo_ || custom_role_image_;
+        const auto text = image_overlay ? lv_color_white() : lv_color_hex(YGSOUL_UI_TEXT);
         lv_obj_set_style_bg_opa(top_bar_, LV_OPA_TRANSP, 0);
         lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_color(bottom_bar_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(bottom_bar_, custom_role_image_ ? LV_OPA_60 : LV_OPA_TRANSP, 0);
         lv_obj_set_style_text_color(network_label_, text, 0);
         lv_obj_set_style_text_color(status_label_, text, 0);
         lv_obj_set_style_text_color(notification_label_, text, 0);
@@ -248,7 +253,7 @@ private:
     }
 
     void StartYGSoulSpeakingAnimation() {
-        if (ygsoul_mouth_image_ == nullptr || ygsoul_mouth_speaking_) {
+        if (custom_role_image_ || ygsoul_mouth_image_ == nullptr || ygsoul_mouth_speaking_) {
             return;
         }
         SetYGSoulMouthFrame(YGSOUL_MOUTH_CLOSED);
@@ -288,7 +293,11 @@ private:
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(ygsoul_image_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
+        if (custom_role_image_) {
+            lv_obj_add_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
+        }
         lv_obj_add_flag(ygsoul_boot_image_, LV_OBJ_FLAG_HIDDEN);
         if (!ygsoul_mouth_speaking_) {
             SetYGSoulMouthFrame(YGSOUL_MOUTH_CLOSED);
@@ -409,6 +418,76 @@ public:
         }
     }
 
+    virtual bool SetRoleImage(const char* path) override {
+        if (path == nullptr || !IsSetupUICalled() || ygsoul_image_ == nullptr) {
+            return false;
+        }
+        if (path[0] == '\0') {
+            auto image = LoadYGSoulAsset("ygsoul_companion_nomouth.cbin");
+            if (!image) return false;
+            DisplayLockGuard lock(this);
+            if (!lock) return false;
+            StopYGSoulSpeakingAnimation();
+            ygsoul_companion_ = std::move(image);
+            custom_role_image_ = false;
+            lv_image_set_src(ygsoul_image_, ygsoul_companion_->image_dsc());
+            if (ygsoul_mouth_image_ != nullptr) {
+                lv_obj_clear_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
+            }
+            ShowYGSoulCompanion();
+            return true;
+        }
+        FILE* file = fopen(path, "rb");
+        if (file == nullptr || fseek(file, 0, SEEK_END) != 0) {
+            if (file != nullptr) fclose(file);
+            return false;
+        }
+        const long size = ftell(file);
+        if (size <= 0 || size > 192 * 1024 || fseek(file, 0, SEEK_SET) != 0) {
+            fclose(file);
+            return false;
+        }
+        void* data = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (data == nullptr || fread(data, 1, size, file) != static_cast<size_t>(size)) {
+            if (data != nullptr) heap_caps_free(data);
+            fclose(file);
+            return false;
+        }
+        fclose(file);
+        uint8_t* decoded_data = nullptr;
+        size_t decoded_size = 0;
+        size_t decoded_width = 0;
+        size_t decoded_height = 0;
+        size_t decoded_stride = 0;
+        const esp_err_t decode_result = jpeg_to_image(
+            static_cast<const uint8_t*>(data), size, &decoded_data, &decoded_size,
+            &decoded_width, &decoded_height, &decoded_stride);
+        heap_caps_free(data);
+        if (decode_result != ESP_OK || decoded_data == nullptr) {
+            if (decoded_data != nullptr) heap_caps_free(decoded_data);
+            return false;
+        }
+        try {
+            auto image = std::make_unique<LvglAllocatedImage>(
+                decoded_data, decoded_size, decoded_width, decoded_height,
+                decoded_stride, LV_COLOR_FORMAT_RGB565);
+            decoded_data = nullptr;
+            DisplayLockGuard lock(this);
+            if (!lock) return false;
+            StopYGSoulSpeakingAnimation();
+            ygsoul_companion_ = std::move(image);
+            custom_role_image_ = true;
+            lv_image_set_src(ygsoul_image_, ygsoul_companion_->image_dsc());
+            lv_obj_center(ygsoul_image_);
+            lv_obj_add_flag(ygsoul_mouth_image_, LV_OBJ_FLAG_HIDDEN);
+            ShowYGSoulCompanion();
+            return true;
+        } catch (...) {
+            if (decoded_data != nullptr) heap_caps_free(decoded_data);
+            return false;
+        }
+    }
+
     virtual void SetStatus(const char* status) override {
         LcdDisplay::SetStatus(status);
         const bool speaking = Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking;
@@ -480,9 +559,21 @@ private:
         // 保留 Wi-Fi / WSS 会话；该设备只进入低亮度省电模式，绝不由空闲计时器断电。
         power_save_timer_ = new PowerSaveTimer(-1, GetAutoSleepMinutes() * 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
-            EnterSuperPowerSave();
+            auto& app = Application::GetInstance();
+            app.Schedule([this]() {
+                auto& app = Application::GetInstance();
+                if (!app.CanEnterSleepMode()) {
+                    power_save_timer_->WakeUp();
+                    return;
+                }
+                if (app.GetDeviceState() == kDeviceStateListening) {
+                    app.EnterStandby();
+                }
+                EnterSuperPowerSave();
+            });
         });
         power_save_timer_->OnExitSleepMode([this]() {
+            super_power_save_ = false;
             GetDisplay()->SetPowerSaveMode(false);
             GetBacklight()->RestoreBrightness();
         });

@@ -35,6 +35,17 @@ def test_initialize_protocol_reuses_existing_clients():
     assert "if (management_client_ == nullptr)" in init or "if (!management_client_)" in init
 
 
+def test_management_commands_never_overwrite_conversation_text():
+    source = _read("main/application.cc")
+    handler = _slice(
+        source,
+        "void Application::HandleCustomMessage(",
+        "void Application::ReportDeviceUplink(",
+    )
+    assert 'SetChatMessage("system", payload_str.c_str())' not in handler
+    assert "cJSON_PrintUnformatted(payload)" not in handler
+
+
 def test_conversation_states_switch_off_boot_logo_to_companion():
     emotion = _slice(
         _read("main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc"),
@@ -76,6 +87,21 @@ def test_super_power_save_never_tears_down_the_websocket():
     super_save = _slice(board, "void EnterSuperPowerSave()", "void ExitSuperPowerSave()")
     assert "CRITICAL-RUNTIME-CONTRACT" in super_save
     assert "CloseAudioChannel" not in super_save
+
+
+def test_auto_sleep_moves_silent_listening_to_standby_before_screen_power_save():
+    application = (ROOT / "main/application.cc").read_text(encoding="utf-8")
+    board = (ROOT / "main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc").read_text(encoding="utf-8")
+
+    can_sleep = _slice(application, "bool Application::CanEnterSleepMode()", "void Application::SendMcpMessage")
+    assert "kDeviceStateListening" in can_sleep
+    assert "IsVoiceDetected" in can_sleep
+    assert "IsAudioChannelOpened" not in can_sleep
+
+    timer = _slice(board, "void InitializePowerSaveTimer()", "void EnterSuperPowerSave()")
+    assert "EnterStandby();" in timer
+    assert timer.index("EnterStandby();") < timer.index("EnterSuperPowerSave();")
+    assert "super_power_save_ = false;" in timer
 
 
 def test_dismiss_commands_finish_tts_before_standby_and_wake_clears_dismissal():
@@ -223,7 +249,17 @@ def test_pairing_starts_ble_after_conversation_audio_is_released():
     assert "YgSoulBleProvisioning::GetInstance().Start()" in ble_start
     assert "Application::GetInstance().Schedule" in ble_start
     assert "EnableVoiceProcessing(false);" in state_changed
-    assert "EnableWakeWordDetection(true);" in state_changed
+    assert "EnableWakeWordDetection(false);" in state_changed
+
+
+def test_pairing_does_not_restart_an_active_ble_advertisement():
+    header = _read("main/boards/common/ygsoul_ble_provisioning.h")
+    ble = _read("main/boards/common/ygsoul_ble_provisioning.cc")
+    ensure = _slice(ble, "void YgSoulBleProvisioning::EnsureAdvertising()", "void YgSoulBleProvisioning::Stop()")
+
+    assert "advertising_" in header
+    assert "advertising_" in ensure
+    assert "ESP_GAP_BLE_ADV_START_COMPLETE_EVT" in ble
 
 
 if __name__ == "__main__":
@@ -231,6 +267,7 @@ if __name__ == "__main__":
     test_pairing_wifi_up_stays_in_config_until_exit()
     test_activation_and_pairing_exit_enter_standby()
     test_super_power_save_never_tears_down_the_websocket()
+    test_auto_sleep_moves_silent_listening_to_standby_before_screen_power_save()
     test_dismiss_commands_finish_tts_before_standby_and_wake_clears_dismissal()
     test_dismissal_acknowledgement_tts_must_start_before_it_can_finish_to_standby()
     test_wake_words_are_youguang_not_xiaozhi()
@@ -241,4 +278,5 @@ if __name__ == "__main__":
     test_pairing_reboots_before_ble_when_conversation_memory_is_active()
     test_pairing_completion_returns_to_standby_without_rebooting()
     test_pairing_starts_ble_after_conversation_audio_is_released()
+    test_pairing_does_not_restart_an_active_ble_advertisement()
     print("PASS: conversation listen flow")
