@@ -2,7 +2,7 @@ menu "Xiaozhi Assistant"
 
 config OTA_URL
     string "Default OTA URL"
-    default "https://api.tenclass.net/xiaozhi/ota/"
+    default "https://yomitest.gwcz.online/ydp/v1/ota/ygsoul/check"
     help
         The application will access this URL to check for new firmwares and server address.
 

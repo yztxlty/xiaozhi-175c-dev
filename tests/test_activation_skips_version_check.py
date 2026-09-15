@@ -34,19 +34,20 @@ def test_activation_only_confirms_a_rebooted_upgrade_without_polling_for_updates
 
     assert "ota_->MarkCurrentVersionValid();" in task
     assert "ota_->ConfirmPendingUpgrade();" in task
-    assert "have_local_endpoints" in task
+    assert "have_local_endpoints" not in task
     assert "HasNewVersion(" not in task
     assert "GetFirmwareUrl(" not in task
 
 
-def test_cached_endpoints_do_not_skip_the_post_reboot_ota_success_report():
+def test_activation_refreshes_connection_endpoints_before_protocol_start():
     task = _slice(_source(), "void Application::ActivationTask()", "void Application::CheckAssetsVersion()")
+    refresh = task.index("while (ota_->CheckVersion() != ESP_OK)")
     mark_valid = task.index("ota_->MarkCurrentVersionValid();")
     confirm = task.index("ota_->ConfirmPendingUpgrade();")
     initialize = task.index("InitializeProtocol();")
-    cached_branch_end = task.index("\n    }\n\n    // A successful OTA")
 
-    assert cached_branch_end < mark_valid < confirm < initialize
+    assert refresh < mark_valid < confirm < initialize
+    assert "Reuse local websocket/management endpoints" not in task
 
 
 def test_activation_retries_connection_config_and_never_reports_false_success():

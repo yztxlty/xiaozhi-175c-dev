@@ -385,17 +385,9 @@ void Application::ActivationTask() {
     // Pairing already finished; do not check firmware/assets versions,
     // auto-upgrade, or wait for an activation code.
     ota_ = std::make_unique<Ota>();
-    Settings websocket_settings("websocket", false);
-    Settings management_settings("management", false);
-    const bool have_local_endpoints = !websocket_settings.GetString("url").empty()
-        || !management_settings.GetString("url").empty();
-    if (have_local_endpoints) {
-        ESP_LOGI(TAG, "Reuse local websocket/management endpoints, skip version check");
-    } else {
-        while (ota_->CheckVersion() != ESP_OK) {
-            ESP_LOGW(TAG, "Connection config fetch failed, retry in 1 second");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+    while (ota_->CheckVersion() != ESP_OK) {
+        ESP_LOGW(TAG, "Connection config fetch failed, retry in 1 second");
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     // A successful OTA must be acknowledged after reboot even when connection
