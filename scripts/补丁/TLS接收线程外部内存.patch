@@ -1,0 +1,86 @@
+--- a/components/78__esp-ml307/src/esp/esp_ssl.cc
++++ b/components/78__esp-ml307/src/esp/esp_ssl.cc
+@@ -1,12 +1,13 @@
+ #include "esp_ssl.h"
+ #include <esp_log.h>
+ #include <esp_crt_bundle.h>
++#include <esp_heap_caps.h>
+ #include <cstring>
+ #include <unistd.h>
+
+ static const char *TAG = "EspSsl";
+
+-EspSsl::EspSsl() {
++EspSsl::EspSsl(bool external_stack) : external_stack_(external_stack) {
+     event_group_ = xEventGroupCreate();
+ }
+
+@@ -55,12 +56,21 @@
+     connected_ = true;
+
+     xEventGroupClearBits(event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT);
+-    xTaskCreate([](void* arg) {
++    // 资源/音乐接收栈不需要 DMA；直接写 Flash 的语音回调仍保留内部栈。
++    if (xTaskCreateWithCaps([](void* arg) {
+         EspSsl* ssl = (EspSsl*)arg;
+         ssl->ReceiveTask();
+         xEventGroupSetBits(ssl->event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT);
+-        vTaskDelete(NULL);
+-    }, "ssl_receive", 4096, this, 1, &receive_task_handle_);
++        vTaskDeleteWithCaps(NULL);
++    }, "ssl_receive", 4096, this, 1, &receive_task_handle_,
++       (external_stack_ ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL) | MALLOC_CAP_8BIT) != pdPASS) {
++        connected_ = false;
++        last_error_ = ESP_ERR_NO_MEM;
++        esp_tls_conn_destroy(tls_client_);
++        tls_client_ = nullptr;
++        ESP_LOGE(TAG, "Unable to allocate TLS receive task");
++        return false;
++    }
+     return true;
+ }
+
+--- a/components/78__esp-ml307/src/esp/esp_ssl.h
++++ b/components/78__esp-ml307/src/esp/esp_ssl.h
+@@ -12,7 +12,7 @@
+
+ class EspSsl : public Tcp {
+ public:
+-    EspSsl();
++    explicit EspSsl(bool external_stack = false);
+     ~EspSsl();
+
+     bool Connect(const std::string& host, int port) override;
+@@ -22,6 +22,7 @@
+     int GetLastError() override;
+
+ private:
++    bool external_stack_ = false;
+     esp_tls_t* tls_client_ = nullptr;
+     EventGroupHandle_t event_group_ = nullptr;
+     TaskHandle_t receive_task_handle_ = nullptr;
+@@ -30,4 +31,4 @@
+     void ReceiveTask();
+ };
+
+-#endif // _ESP_SSL_H_
+\ No newline at end of file
++#endif // _ESP_SSL_H_
+--- a/components/78__esp-ml307/src/esp/esp_network.cc
++++ b/components/78__esp-ml307/src/esp/esp_network.cc
+@@ -25,7 +25,7 @@
+ }
+
+ std::unique_ptr<Tcp> EspNetwork::CreateSsl(int connect_id) {
+-    return std::make_unique<EspSsl>();
++    return std::make_unique<EspSsl>(connect_id == 2 || connect_id == 3);
+ }
+
+ std::unique_ptr<Udp> EspNetwork::CreateUdp(int connect_id) {
+@@ -38,4 +38,4 @@
+
+ std::unique_ptr<WebSocket> EspNetwork::CreateWebSocket(int connect_id) {
+     return std::make_unique<WebSocket>(this, connect_id);
+-}
+\ No newline at end of file
++}

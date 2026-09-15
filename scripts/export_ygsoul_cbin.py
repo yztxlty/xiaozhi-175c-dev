@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 import struct
+import subprocess
 from pathlib import Path
 
 
@@ -15,7 +16,6 @@ OUTPUT_DIR = BOARD_DIR / "assets/cbin"
 SOURCE_DIR = BOARD_DIR / "assets/source_arrays"
 
 ASSETS = {
-    "ygsoul_boot": ("ygsoul_boot_lvgl.h", "ygsoul_boot_pixels", 0x12, 466, 466, 932),
     "ygsoul_companion_nomouth": (
         "ygsoul_companion_nomouth.c",
         "ygsoul_companion_nomouth_map",
@@ -27,6 +27,10 @@ ASSETS = {
     "ygsoul_mouth_1": ("ygsoul_mouth_1.c", "ygsoul_mouth_1_map", 0x14, 38, 29, 76),
     "ygsoul_mouth_2": ("ygsoul_mouth_2.c", "ygsoul_mouth_2_map", 0x14, 38, 29, 76),
     "ygsoul_mouth_3": ("ygsoul_mouth_3.c", "ygsoul_mouth_3_map", 0x14, 38, 29, 76),
+}
+
+PNG_ASSETS = {
+    "ygsoul_music_cover": ("ygsoul_music_cover.png", 190, 190),
 }
 
 
@@ -56,6 +60,16 @@ def build_cbin(source_name: str, symbol: str, color_format: int, width: int, hei
     return header + pixels
 
 
+def build_png_cbin(source_name: str, width: int, height: int) -> bytes:
+    pixels = subprocess.check_output([
+        "ffmpeg", "-v", "error", "-i", str(BOARD_DIR / "assets" / source_name),
+        "-vf", f"scale={width}:{height}", "-pix_fmt", "rgb565le", "-f", "rawvideo", "-",
+    ])
+    if len(pixels) != width * height * 2:
+        raise ValueError(f"unexpected pixel size for {source_name}: {len(pixels)}")
+    return struct.pack("<4sBBHHHI", b"YGI1", 0x12, 0, width, height, width * 2, len(pixels)) + pixels
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="verify committed output without writing")
@@ -73,6 +87,16 @@ def main() -> None:
         else:
             output.write_bytes(expected)
         print(f"{name}: {len(expected)} bytes, pixel payload identical")
+
+    for name, values in PNG_ASSETS.items():
+        expected = build_png_cbin(*values)
+        output = OUTPUT_DIR / f"{name}.cbin"
+        if args.check:
+            if not output.is_file() or output.read_bytes() != expected:
+                raise SystemExit(f"CBin out of date: {output}")
+        else:
+            output.write_bytes(expected)
+        print(f"{name}: {len(expected)} bytes")
 
 
 if __name__ == "__main__":

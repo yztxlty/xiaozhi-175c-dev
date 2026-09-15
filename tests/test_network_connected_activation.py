@@ -27,9 +27,10 @@ struct Application {
     void* management_client_;
     int activations = 0;
     State GetDeviceState() { return state; }
-    void SetDeviceState(State next) { state = next; }
-    void StartActivationIfNeeded() { ++activations; }
-    void ReportDeviceUplink(const char*, const char* = nullptr) {}
+        void SetDeviceState(State next) { state = next; }
+        void StartActivationIfNeeded() { ++activations; }
+        void StartNetworkTimeSync() {}
+        void ReportDeviceUplink(const char*, const char* = nullptr) {}
     void HandleNetworkConnectedEvent();
     void HandleNetworkDisconnectedEvent();
 };

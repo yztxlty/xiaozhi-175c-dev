@@ -16,6 +16,8 @@ namespace {
 
 constexpr const char* kMountPoint = "/content";
 constexpr const char* kPartitionLabel = "content";
+constexpr const char* kGalleryMountPoint = "/gallery";
+constexpr const char* kGalleryPartitionLabel = "gallery";
 constexpr std::array<const char*, 5> kContentDirectories = {
     "/content/music",
     "/content/games",
@@ -67,6 +69,10 @@ ContentStorage& ContentStorage::GetInstance() {
 }
 
 ContentStorage::~ContentStorage() {
+    if (gallery_wl_handle_ >= 0) {
+        esp_vfs_fat_spiflash_unmount_rw_wl(kGalleryMountPoint, gallery_wl_handle_);
+        gallery_wl_handle_ = -1;
+    }
     if (wl_handle_ >= 0) {
         esp_vfs_fat_spiflash_unmount_rw_wl(kMountPoint, wl_handle_);
         wl_handle_ = -1;
@@ -82,7 +88,7 @@ bool ContentStorage::Initialize() {
     // The migration flashes a pre-formatted wear-levelled FAT image. Never
     // format at runtime: a failed mount must preserve every recoverable byte.
     mount_config.format_if_mount_failed = false;
-    mount_config.max_files = 12;
+    mount_config.max_files = 32;
     mount_config.allocation_unit_size = 4096;
     mount_config.disk_status_check_enable = false;
     mount_config.use_one_fat = false;
@@ -99,6 +105,19 @@ bool ContentStorage::Initialize() {
         esp_vfs_fat_spiflash_unmount_rw_wl(kMountPoint, wl_handle_);
         wl_handle_ = -1;
         health_ = Health::Corrupt;
+        return false;
+    }
+
+    esp_vfs_fat_mount_config_t gallery_mount_config = mount_config;
+    gallery_mount_config.format_if_mount_failed = true;
+    result = esp_vfs_fat_spiflash_mount_rw_wl(
+        kGalleryMountPoint, kGalleryPartitionLabel, &gallery_mount_config, &gallery_wl_handle_);
+    if (result != ESP_OK) {
+        gallery_wl_handle_ = -1;
+        esp_vfs_fat_spiflash_unmount_rw_wl(kMountPoint, wl_handle_);
+        wl_handle_ = -1;
+        health_ = Health::Corrupt;
+        ESP_LOGE(TAG, "Failed to mount gallery partition: %s", esp_err_to_name(result));
         return false;
     }
 
@@ -121,9 +140,16 @@ ContentStorage::Stats ContentStorage::GetStats() const {
         stats.total_bytes = static_cast<size_t>(total_bytes);
         stats.free_bytes = static_cast<size_t>(free_bytes);
     }
+    if (esp_vfs_fat_info(kGalleryMountPoint, &total_bytes, &free_bytes) == ESP_OK) {
+        stats.gallery_total_bytes = static_cast<size_t>(total_bytes);
+        stats.gallery_free_bytes = static_cast<size_t>(free_bytes);
+        stats.total_bytes += stats.gallery_total_bytes;
+        stats.free_bytes += stats.gallery_free_bytes;
+    }
     stats.music_bytes = DirectoryBytes("/content/music");
     stats.game_bytes = DirectoryBytes("/content/games");
     stats.small_bytes = DirectoryBytes("/content/covers") + DirectoryBytes("/content/save");
+    stats.gallery_bytes = DirectoryBytes(kGalleryMountPoint);
     return stats;
 }
 

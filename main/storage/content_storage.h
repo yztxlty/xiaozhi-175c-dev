@@ -17,6 +17,7 @@ public:
         Music,
         Games,
         SmallFiles,
+        Gallery,
     };
 
     struct Stats {
@@ -25,11 +26,15 @@ public:
         size_t music_bytes;
         size_t game_bytes;
         size_t small_bytes;
+        size_t gallery_bytes;
+        size_t gallery_total_bytes;
+        size_t gallery_free_bytes;
     };
 
     static constexpr size_t kMusicQuotaBytes = 8 * 1024 * 1024;
     static constexpr size_t kGameQuotaBytes = 2 * 1024 * 1024;
     static constexpr size_t kSmallFilesQuotaBytes = 512 * 1024;
+    static constexpr size_t kGalleryQuotaBytes = 6 * 1024 * 1024;
     static constexpr size_t kSafetyReserveBytes = 1536 * 1024;
 
     static ContentStorage& GetInstance();
@@ -70,12 +75,16 @@ public:
                 used = stats.small_bytes;
                 quota = kSmallFilesQuotaBytes;
                 break;
+            case Category::Gallery:
+                used = stats.gallery_bytes;
+                quota = kGalleryQuotaBytes;
+                break;
         }
         if (used > quota || bytes > quota - used) {
             return false;
         }
-        return stats.free_bytes > kSafetyReserveBytes &&
-               bytes <= stats.free_bytes - kSafetyReserveBytes;
+        const size_t free = category == Category::Gallery ? stats.gallery_free_bytes : stats.free_bytes;
+        return free > kSafetyReserveBytes && bytes <= free - kSafetyReserveBytes;
     }
 
     static std::string BuildPath(Category category, const std::string& file_name) {
@@ -89,6 +98,8 @@ public:
                 return "/content/games/" + file_name;
             case Category::SmallFiles:
                 return "/content/save/" + file_name;
+            case Category::Gallery:
+                return "/gallery/" + file_name;
         }
         return {};
     }
@@ -100,4 +111,5 @@ private:
 
     Health health_ = Health::Unavailable;
     int32_t wl_handle_ = -1;
+    int32_t gallery_wl_handle_ = -1;
 };

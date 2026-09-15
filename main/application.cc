@@ -11,6 +11,8 @@
 #include "assets.h"
 #include "settings.h"
 #include "device_content/role_visual_store.h"
+#include "device_content/gallery_store.h"
+#include "watch/watch_face_store.h"
 #include "ssid_manager.h"
 #include "ydp_bootstrap.h"
 #include "wifi_board.h"
@@ -20,10 +22,13 @@
 #endif
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <freertos/queue.h>
 #include <esp_log.h>
+#include <esp_netif_sntp.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -67,6 +72,10 @@ Application::~Application() {
 }
 
 bool Application::SetDeviceState(DeviceState state) {
+    // 迟到的云端播报不能让待命设备重新进入说话或聆听。
+    if ((state == kDeviceStateListening || state == kDeviceStateSpeaking) &&
+        !voice_session_active_.load()) return false;
+    if (state == kDeviceStateIdle) voice_session_active_ = false;
     return state_machine_.TransitionTo(state);
 }
 
@@ -268,6 +277,7 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_CLOCK_TICK) {
             clock_ticks_++;
+            Board::GetInstance().RefreshDynamicData();
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
         
@@ -284,9 +294,28 @@ void Application::Run() {
     }
 }
 
+void Application::StartNetworkTimeSync() {
+    setenv("TZ", "CST-8", 1);
+    tzset();
+    if (network_time_sync_started_) return;
+
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        3, ESP_SNTP_SERVER_LIST("ntp.aliyun.com", "cn.pool.ntp.org", "pool.ntp.org"));
+    config.smooth_sync = false;
+    config.sync_cb = [](timeval* tv) {
+        ESP_LOGI(TAG, "SNTP synchronized: %lld", static_cast<long long>(tv->tv_sec));
+    };
+    const esp_err_t error = esp_netif_sntp_init(&config);
+    network_time_sync_started_ = error == ESP_OK || error == ESP_ERR_INVALID_STATE;
+    if (!network_time_sync_started_) {
+        ESP_LOGW(TAG, "SNTP start failed: %s", esp_err_to_name(error));
+    }
+}
+
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     auto state = GetDeviceState();
+    StartNetworkTimeSync();
 
     if (management_client_ != nullptr) {
         ESP_LOGI(TAG, "Reporting online immediately after Wi-Fi join");
@@ -546,7 +575,7 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
+        if (voice_session_active_.load() && GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -735,6 +764,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
     bool succeeded = false;
     bool command_changes_telemetry = false;
     bool voice_session_refresh_required = false;
+    std::string deleted_gallery_item_id;
     const char* error_code = nullptr;
     if (strcmp(command->valuestring, "setVolume") == 0) {
         auto params = cJSON_GetObjectItem(payload, "params");
@@ -773,11 +803,18 @@ void Application::HandleCustomMessage(const cJSON* root) {
         auto url = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "url") : nullptr;
         auto sha256 = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "sha256") : nullptr;
         auto bytes = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "bytes") : nullptr;
+        auto format = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "format") : nullptr;
         if (cJSON_IsString(resource_id) && cJSON_IsNumber(version) && cJSON_IsString(url) &&
             cJSON_IsString(sha256) && cJSON_IsNumber(bytes)) {
+            const char* resolved_format = cJSON_IsString(format) ? format->valuestring : "jpg";
+            const bool restore_low_power = GetDeviceState() == kDeviceStateIdle;
+            board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+            board.GetDisplay()->PrepareGalleryDownload();
             succeeded = RoleVisualStore::GetInstance().Prepare(
                 resource_id->valuestring, version->valueint, url->valuestring,
-                sha256->valuestring, static_cast<size_t>(bytes->valuedouble));
+                sha256->valuestring, static_cast<size_t>(bytes->valuedouble), resolved_format);
+            RoleVisualStore::GetInstance().LoadActive();
+            if (restore_low_power) board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             if (!succeeded) error_code = "role_visual_prepare_failed";
         } else {
             error_code = "invalid_params";
@@ -866,6 +903,35 @@ void Application::HandleCustomMessage(const cJSON* root) {
         if (!succeeded) {
             error_code = "storage_purge_failed";
         }
+    } else if (strcmp(command->valuestring, "applyGallery") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        const bool restore_low_power = GetDeviceState() == kDeviceStateIdle;
+        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        board.GetDisplay()->PrepareGalleryDownload();
+        succeeded = GalleryStore::GetInstance().Apply(params);
+        board.GetDisplay()->RefreshGallery();
+        if (restore_low_power) {
+            board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        }
+        command_changes_telemetry = succeeded;
+        if (!succeeded) error_code = "gallery_apply_failed";
+    } else if (strcmp(command->valuestring, "applyWatchFace") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        const bool restore_low_power = GetDeviceState() == kDeviceStateIdle;
+        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        board.GetDisplay()->PrepareGalleryDownload();
+        succeeded = WatchFaceStore::GetInstance().Apply(params);
+        board.GetDisplay()->RefreshWatchFace();
+        if (restore_low_power) board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        command_changes_telemetry = succeeded;
+        if (!succeeded) error_code = "watch_face_apply_failed";
+    } else if (strcmp(command->valuestring, "deleteGalleryItem") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        auto item_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "itemId") : nullptr;
+        succeeded = cJSON_IsString(item_id) && GalleryStore::GetInstance().DeleteItem(item_id->valuestring);
+        if (succeeded) deleted_gallery_item_id = item_id->valuestring;
+        command_changes_telemetry = succeeded;
+        if (!succeeded) error_code = cJSON_IsString(item_id) ? "gallery_delete_failed" : "invalid_params";
     } else if (strcmp(command->valuestring, "unbind") == 0) {
         // CRITICAL-RUNTIME-CONTRACT: App unbind is a re-pair operation. ACK first,
         // then clear local Wi-Fi and enter provisioning; ordinary reboot never clears Wi-Fi.
@@ -904,6 +970,31 @@ void Application::HandleCustomMessage(const cJSON* root) {
         }
         if (succeeded && strcmp(command->valuestring, "clearStorage") == 0) {
             cJSON_AddBoolToObject(reported, "storageCleaned", true);
+        }
+        if (succeeded && (strcmp(command->valuestring, "applyGallery") == 0 ||
+                          strcmp(command->valuestring, "deleteGalleryItem") == 0)) {
+            auto& gallery = GalleryStore::GetInstance();
+            cJSON_AddStringToObject(reported, "galleryResourceId", gallery.ResourceId().c_str());
+            cJSON_AddStringToObject(reported, "galleryContentVersion", gallery.ContentVersion().c_str());
+            cJSON_AddNumberToObject(reported, "galleryCount", static_cast<double>(gallery.Count()));
+            auto inventory = cJSON_AddArrayToObject(reported, "galleryItems");
+            for (const auto& item : gallery.Items()) {
+                auto row = cJSON_CreateObject();
+                cJSON_AddStringToObject(row, "itemId", item.item_id.c_str());
+                cJSON_AddStringToObject(row, "format", item.format.c_str());
+                cJSON_AddStringToObject(row, "sha256", item.sha256.c_str());
+                cJSON_AddNumberToObject(row, "sizeBytes", static_cast<double>(item.bytes));
+                cJSON_AddItemToArray(inventory, row);
+            }
+        }
+        if (succeeded && strcmp(command->valuestring, "applyWatchFace") == 0) {
+            auto& watch_face = WatchFaceStore::GetInstance();
+            cJSON_AddStringToObject(reported, "watchFaceResourceId", watch_face.ResourceId().c_str());
+            cJSON_AddStringToObject(reported, "watchFaceContentVersion", watch_face.ContentVersion().c_str());
+            cJSON_AddStringToObject(reported, "watchFaceStatus", "APPLIED");
+        }
+        if (!deleted_gallery_item_id.empty()) {
+            cJSON_AddStringToObject(reported, "deletedGalleryItemId", deleted_gallery_item_id.c_str());
         }
         cJSON_AddItemToObject(result, "reported", reported);
     }
@@ -981,18 +1072,19 @@ void Application::RefreshVoiceSessionAfterRoleChange() {
     if (!protocol_->OpenAudioChannel()) {
         refreshing_role_voice_.store(false);
         SetDeviceState(kDeviceStateIdle);
-        audio_service_.EnableWakeWordDetection(true);
+        audio_service_.EnableWakeWordDetection(!music_player_visible_.load());
         ESP_LOGW(TAG, "Role voice session refresh failed; wait for next wake retry");
         return;
     }
-    if (resume_listening) {
+    if (resume_listening && voice_session_active_.load()) {
         protocol_->SendStartListening(GetDefaultListeningMode());
         SetListeningMode(GetDefaultListeningMode());
     }
     ESP_LOGI(TAG, "Role voice session refreshed");
 }
 
-void Application::ReportDeviceUplink(const char* report_type, const char* event_type) {
+void Application::ReportDeviceUplink(const char* report_type, const char* event_type,
+                                     const char* gallery_item_id) {
     if (protocol_ == nullptr || report_type == nullptr) {
         return;
     }
@@ -1013,6 +1105,20 @@ void Application::ReportDeviceUplink(const char* report_type, const char* event_
         pairing_session_id = YgSoulBleProvisioning::GetInstance().GetPairingSessionId();
 #endif
         cJSON_AddStringToObject(reported, "pairingSessionId", pairing_session_id.c_str());
+        if (gallery_item_id != nullptr && gallery_item_id[0] != '\0') {
+            cJSON_AddStringToObject(reported, "deletedGalleryItemId", gallery_item_id);
+            auto& gallery = GalleryStore::GetInstance();
+            cJSON_AddNumberToObject(reported, "galleryCount", static_cast<double>(gallery.Count()));
+            auto inventory = cJSON_AddArrayToObject(reported, "galleryItems");
+            for (const auto& item : gallery.Items()) {
+                auto row = cJSON_CreateObject();
+                cJSON_AddStringToObject(row, "itemId", item.item_id.c_str());
+                cJSON_AddStringToObject(row, "format", item.format.c_str());
+                cJSON_AddStringToObject(row, "sha256", item.sha256.c_str());
+                cJSON_AddNumberToObject(row, "sizeBytes", static_cast<double>(item.bytes));
+                cJSON_AddItemToArray(inventory, row);
+            }
+        }
         cJSON_AddItemToObject(payload, "reported", reported);
     }
     auto text = cJSON_PrintUnformatted(response);
@@ -1030,6 +1136,10 @@ void Application::ReportDeviceUplink(const char* report_type, const char* event_
 void Application::ReportDeviceTelemetry() {
     ESP_LOGI(TAG, "Reporting telemetry after local control");
     ReportDeviceUplink("telemetry");
+}
+
+void Application::ReportGalleryItemDeleted(const std::string& item_id) {
+    ReportDeviceUplink("event", "gallery.item.deleted", item_id.c_str());
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -1086,6 +1196,17 @@ void Application::ToggleChatState() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT);
 }
 
+void Application::SetMusicPlayerVisible(bool visible) {
+    if (music_player_visible_.exchange(visible) == visible) return;
+    if (visible) voice_session_active_ = false;
+    // 播放器不接受唤醒词，暂停检测计算；离开播放器后恢复待命唤醒。
+    if (visible || GetDeviceState() == kDeviceStateIdle) {
+        audio_service_.EnableWakeWordDetection(!visible);
+    }
+    // 页面切换不消费上一页面遗留的唤醒词事件，也不主动启动聆听。
+    xEventGroupClearBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
+}
+
 void Application::StartListening() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
@@ -1134,6 +1255,7 @@ void Application::HandleToggleChatEvent() {
 }
 
 void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+    if (!voice_session_active_.load() || music_player_visible_.load()) return;
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
@@ -1149,6 +1271,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 }
 
 void Application::HandleStartListeningEvent() {
+    if (music_player_visible_.load()) return;
     auto state = GetDeviceState();
     
     if (state == kDeviceStateActivating) {
@@ -1166,6 +1289,7 @@ void Application::HandleStartListeningEvent() {
     }
     
     if (state == kDeviceStateIdle) {
+        voice_session_active_ = true;
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
@@ -1197,6 +1321,9 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    if (music_player_visible_.load()) {
+        return;
+    }
     if (!protocol_) {
         return;
     }
@@ -1217,6 +1344,7 @@ void Application::HandleWakeWordDetectedEvent() {
     }
 
     if (state == kDeviceStateIdle) {
+        voice_session_active_ = true;
         // CRITICAL-RUNTIME-CONTRACT: retained standby WebSocket skips Connecting
         // and enters listening in this turn. Do not insert a reconnect here.
         voice_dismissed_ = false;
@@ -1247,7 +1375,7 @@ void Application::HandleWakeWordDetectedEvent() {
             audio_service_.ResetDecoder();
             audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
             // Re-enable wake word detection as it was stopped by the detection itself
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(!music_player_visible_.load());
         } else {
             // Play popup sound and start listening again
             play_popup_on_listening_ = true;
@@ -1260,6 +1388,7 @@ void Application::HandleWakeWordDetectedEvent() {
 }
 
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+    if (!voice_session_active_.load() || music_player_visible_.load()) return;
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
@@ -1267,7 +1396,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(!music_player_visible_.load());
             return;
         }
     }
@@ -1308,7 +1437,7 @@ void Application::HandleStateChangedEvent() {
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(!music_player_visible_.load());
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
@@ -1454,6 +1583,7 @@ void Application::StartActivationIfNeeded() {
 }
 
 void Application::EnterConversationListening(const char* prompt) {
+    voice_session_active_ = true;
     voice_dismissed_ = false;
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
@@ -1467,7 +1597,7 @@ void Application::EnterConversationListening(const char* prompt) {
         if (!protocol_->OpenAudioChannel()) {
             ESP_LOGW(TAG, "Open audio channel failed, wait for wake word");
             SetDeviceState(kDeviceStateIdle);
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(!music_player_visible_.load());
             return;
         }
     }
@@ -1487,7 +1617,7 @@ void Application::EnterStandby() {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     audio_service_.EnableVoiceProcessing(false);
-    audio_service_.EnableWakeWordDetection(true);
+    audio_service_.EnableWakeWordDetection(!music_player_visible_.load());
 }
 
 void Application::EnterVoiceDismissed() {
@@ -1509,7 +1639,7 @@ void Application::ListenForPairingCommand() {
     }
     protocol_->SendStartListening(GetDefaultListeningMode());
     audio_service_.EnableVoiceProcessing(true);
-    audio_service_.EnableWakeWordDetection(true);
+    audio_service_.EnableWakeWordDetection(!music_player_visible_.load());
 }
 
 void Application::Reboot() {
@@ -1610,6 +1740,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         ota_->ReportProgress("FAILED", 0, "下载、校验或写入升级包失败");
         audio_service_.Start(); // Restart audio service
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
+        SetDeviceState(kDeviceStateIdle);
         Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         vTaskDelay(pdMS_TO_TICKS(3000));
         return false;
@@ -1624,6 +1755,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
 }
 
 void Application::WakeWordInvoke(const std::string& wake_word) {
+    if (music_player_visible_.load() || !voice_session_active_.load()) return;
     if (!protocol_) {
         return;
     }

@@ -209,7 +209,7 @@ def test_tts_subtitle_accumulates_sentences_until_current_reply_finishes():
 
 def test_role_visual_uses_existing_jpeg_decoder_before_lvgl_display():
     board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text()
-    block = board[board.index('bool SetRoleImage(const char* path)'):]
+    block = board[board.index('bool SetRoleImage(const char* path, const char* format = "jpg")'):]
     assert 'jpeg_to_image(' in block
     assert 'std::make_unique<LvglAllocatedImage>(' in block
     assert 'decoded_data, decoded_size, decoded_width, decoded_height' in block
@@ -239,7 +239,21 @@ def test_role_visual_download_is_isolated_from_conversation_runtime():
     assert 'RoleVisualStore::Prepare' in store
     assert 'RoleVisualStore::Commit' in store
     assert 'SetRoleImage' in display
-    assert 'std::remove(SlotPath(old_slot).c_str())' in store
+
+
+def test_role_visual_download_releases_gallery_decoder_and_supports_eaf():
+    application = (ROOT / 'main/application.cc').read_text()
+    handler = application[application.index('strcmp(command->valuestring, "prepareRoleVisual")'):]
+    handler = handler[:handler.index('strcmp(command->valuestring, "commitActiveRole")')]
+    assert 'PrepareGalleryDownload()' in handler
+    assert 'PowerSaveLevel::PERFORMANCE' in handler
+    assert 'cJSON_IsString(format) ? format->valuestring : "jpg"' in handler
+
+    store = (ROOT / 'main/device_content/role_visual_store.cc').read_text()
+    board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text()
+    assert 'first[0] == 0x89 && memcmp(first + 1, "EAF", 3) == 0' in store
+    assert 'lv_eaf_create(lv_screen_active())' in board
+    assert 'std::remove(SlotPath(old_slot, old_format).c_str())' in store
     assert 'EraseKey("prep_slot")' in store
     assert 'resource_id == "BUILTIN_FALLBACK"' in store
     assert 'SetRoleImage("")' in store
@@ -247,6 +261,23 @@ def test_role_visual_download_is_isolated_from_conversation_runtime():
     assert application.count('RoleVisualStore::GetInstance().Clear()') == 2
     assert 'audio_service_' not in store
     assert 'SetDeviceState' not in store
+
+
+def test_resource_download_releases_non_watch_visuals_without_preempting_watch():
+    board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text()
+    release = board[board.index('void PrepareGalleryDownload() override'):]
+    release = release[:release.index('void RefreshGallery() override')]
+    assert 'StopGalleryAnimation();' in release
+    assert 'StopRoleAnimation();' in release
+    assert 'const bool keep_watch = launcher_state_.page() == YGSoulPage::kWatch;' in release
+    assert 'ReleaseLauncherTransition(keep_watch);' in release
+    assert 'StopWatchClock();' not in release
+    assert 'launcher_state_.page() == YGSoulPage::kGallery' not in release
+
+    application = (ROOT / 'main/application.cc').read_text()
+    handler = application[application.index('strcmp(command->valuestring, "prepareRoleVisual")'):]
+    handler = handler[:handler.index('strcmp(command->valuestring, "commitActiveRole")')]
+    assert 'RoleVisualStore::GetInstance().LoadActive();' in handler
 
 
 def test_opening_code_is_persisted_before_ready_without_audio_changes():
@@ -278,6 +309,7 @@ if __name__ == "__main__":
     test_clear_storage_erases_transient_flash_without_touching_valid_pack()
     test_active_role_command_persists_exact_configuration_receipt_without_touching_voice_runtime()
     test_role_visual_download_is_isolated_from_conversation_runtime()
+    test_role_visual_download_releases_gallery_decoder_and_supports_eaf()
     test_role_commit_refreshes_voice_session_only_when_voice_changes_after_ack()
     test_same_role_visual_revision_does_not_decode_the_same_jpeg_again()
     test_display_lock_guard_never_unlocks_a_lock_it_did_not_acquire()

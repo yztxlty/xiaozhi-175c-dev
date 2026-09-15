@@ -9,7 +9,7 @@ public:
 
     bool Prepare(const std::string& resource_id, int version,
                  const std::string& url, const std::string& sha256,
-                 size_t expected_bytes);
+                 size_t expected_bytes, const std::string& format = "jpg");
     bool Commit(const std::string& role_id, const std::string& resource_id,
                 int resource_version, int configuration_revision);
     void LoadActive();
@@ -17,5 +17,5 @@ public:
 
 private:
     RoleVisualStore() = default;
-    std::string SlotPath(const std::string& slot) const;
+    std::string SlotPath(const std::string& slot, const std::string& format = "jpg") const;
 };

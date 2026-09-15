@@ -91,6 +91,7 @@ public:
      * Sends MAIN_EVENT_TOGGLE_CHAT to be handled in Run()
      */
     void ToggleChatState();
+    void SetMusicPlayerVisible(bool visible);
 
     /**
      * Start listening (event-based, thread-safe)
@@ -122,6 +123,7 @@ public:
      */
     void ResetProtocol();
     void ReportDeviceTelemetry();
+    void ReportGalleryItemDeleted(const std::string& item_id);
 
 private:
     Application();
@@ -141,10 +143,13 @@ private:
     std::unique_ptr<Ota> ota_;
 
     bool has_server_time_ = false;
+    bool network_time_sync_started_ = false;
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool voice_dismissed_ = false;
+    std::atomic_bool voice_session_active_{false};
+    std::atomic_bool music_player_visible_{false};
     bool show_asr_text_ = true;
     bool show_tts_text_ = true;
     std::string tts_display_text_;
@@ -174,12 +179,14 @@ private:
     void InitializeProtocol();
     void HandleCustomMessage(const struct cJSON* root);
     void RefreshVoiceSessionAfterRoleChange();
-    void ReportDeviceUplink(const char* report_type, const char* event_type = nullptr);
+    void ReportDeviceUplink(const char* report_type, const char* event_type = nullptr,
+                            const char* gallery_item_id = nullptr);
     void EnterConversationListening(const char* prompt);
     void EnterVoiceDismissed();
     void ListenForPairingCommand();
     void SpeakPrompt(const char* text);
     void StartActivationIfNeeded();
+    void StartNetworkTimeSync();
     static bool IsVoiceDismissCommand(const char* text);
     bool HandleWifiConfigVoiceCommand(const char* text);
     void ShowActivationCode(const std::string& code, const std::string& message);

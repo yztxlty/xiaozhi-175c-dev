@@ -6,6 +6,10 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def read(relative_path):
+    return (ROOT / relative_path).read_text()
+
+
 def test_ygsoul_ble_protocol_handles_fragmented_frames_and_crc():
     source = r'''
 #include "boards/common/ygsoul_ble_protocol.h"

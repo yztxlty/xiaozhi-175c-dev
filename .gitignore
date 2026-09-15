@@ -23,9 +23,11 @@ mmap_generate_*.h
 # Local assistant/workspace metadata
 AGENTS.md
 docs/superpowers/
+.ua/
 
 # Local editor and diagnostic artifacts
 .idea/
 .fleet/
 *.log
+sdkconfig.bak
 compile_commands.json

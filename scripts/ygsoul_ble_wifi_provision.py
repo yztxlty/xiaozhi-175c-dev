@@ -71,8 +71,8 @@ def decode_frames(buffer: bytearray) -> list[tuple[int, bytes]]:
 
 
 async def provision(ssid: str, password: str, name_hint: str, timeout: float) -> int:
-    if not ssid or not password:
-        print("SSID/password missing", file=sys.stderr)
+    if not ssid:
+        print("SSID missing", file=sys.stderr)
         return 2
     print(f"scanning BLE for {name_hint} / service 1910", file=sys.stderr)
     device = None

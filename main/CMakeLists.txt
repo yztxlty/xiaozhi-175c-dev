@@ -42,10 +42,16 @@ set(SOURCES "audio/audio_codec.cc"
             "assets.cc"
             "storage/content_storage.cc"
             "device_content/role_visual_store.cc"
+            "device_content/gallery_store.cc"
+            "watch/watch_face_store.cc"
+            "ui/ygsoul_launcher_state.cc"
+            "music/music_frame.cc"
+            "music/music_player.cc"
+            "music/music_client.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "storage" "device_content")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "storage" "device_content" "ui" "music" "watch")
 
 # Add board common files
 list(APPEND SOURCES
@@ -877,6 +883,7 @@ if(NOT LANG_DIR STREQUAL "en-US")
 endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
+set(DEFAULT_WATCH_FACE ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/default_watch_face.jpg)
 
 # If target chip is ESP32, exclude specific files to avoid build errors
 if(CONFIG_IDF_TARGET_ESP32)
@@ -905,7 +912,7 @@ if(CONFIG_IDF_TARGET_ESP32S3)
 endif()
 
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${DEFAULT_WATCH_FACE}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES

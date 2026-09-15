@@ -9,6 +9,7 @@
 
 #include "application.h"
 #include "storage/content_storage.h"
+#include "device_content/gallery_store.h"
 
 #define TAG "main"
 
@@ -27,6 +28,8 @@ extern "C" void app_main(void)
     // writable partition must not prevent the device from booting or updating.
     if (!ContentStorage::GetInstance().Initialize()) {
         ESP_LOGW(TAG, "Content storage is not ready; continuing with core features");
+    } else if (!GalleryStore::GetInstance().Load()) {
+        ESP_LOGW(TAG, "Gallery manifest is invalid; continuing with an empty gallery");
     }
 
     // Initialize and run the application

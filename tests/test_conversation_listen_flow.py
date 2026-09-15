@@ -46,17 +46,31 @@ def test_management_commands_never_overwrite_conversation_text():
     assert "cJSON_PrintUnformatted(payload)" not in handler
 
 
-def test_conversation_states_switch_off_boot_logo_to_companion():
+def test_boot_logo_stays_until_initialization_reaches_idle():
     emotion = _slice(
         _read("main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc"),
         "virtual void SetEmotion(const char* emotion) override",
         "virtual void SetStatus(const char* status) override",
     )
-    assert "kDeviceStateConnecting" in emotion
+    conversation_ui = emotion[emotion.index("const bool conversation_ui") : emotion.index("DisplayLockGuard lock")]
+    assert "kDeviceStateConnecting" not in conversation_ui
+    assert "kDeviceStateIdle" in conversation_ui
     assert "kDeviceStateListening" in emotion
     assert "kDeviceStateSpeaking" in emotion
     assert "ShowYGSoulCompanion" in emotion
     assert "showing_boot_logo_ && !conversation_ui" in emotion
+    role_refresh = _slice(
+        _read("main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc"),
+        "void ShowUpdatedRoleImage()",
+        "virtual bool SetRoleImage",
+    )
+    chat = _slice(
+        _read("main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc"),
+        "virtual void SetChatMessage",
+        "virtual void SetTheme",
+    )
+    assert "if (showing_boot_logo_) return;" in role_refresh
+    assert chat.index("if (showing_boot_logo_) return;") < chat.index("LcdDisplay::SetChatMessage")
 
 
 def test_pairing_wifi_up_stays_in_config_until_exit():
@@ -79,7 +93,7 @@ def test_activation_and_pairing_exit_enter_standby():
     assert "CRITICAL-RUNTIME-CONTRACT" in standby
     assert "SendStopListening" in standby
     assert "CloseAudioChannel" not in standby
-    assert "EnableWakeWordDetection(true)" in standby
+    assert "EnableWakeWordDetection(!music_player_visible_.load())" in standby
 
 
 def test_super_power_save_never_tears_down_the_websocket():
@@ -263,7 +277,7 @@ def test_pairing_does_not_restart_an_active_ble_advertisement():
 
 
 if __name__ == "__main__":
-    test_conversation_states_switch_off_boot_logo_to_companion()
+    test_boot_logo_stays_until_initialization_reaches_idle()
     test_pairing_wifi_up_stays_in_config_until_exit()
     test_activation_and_pairing_exit_enter_standby()
     test_super_power_save_never_tears_down_the_websocket()

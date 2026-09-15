@@ -7,6 +7,7 @@
 #include <udp.h>
 #include <string>
 #include <functional>
+#include <cstdint>
 #include <network_interface.h>
 
 #include "led/led.h"
@@ -78,6 +79,8 @@ public:
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }
     virtual const char* GetNetworkStateIcon() = 0;
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging);
+    virtual bool GetStepCount(uint32_t& steps) { (void)steps; return false; }
+    virtual void RefreshDynamicData() {}
     virtual bool SetAutoSleepMinutes(int minutes) { (void)minutes; return false; }
     virtual int GetAutoSleepMinutes() { return -1; }
     virtual std::string GetSystemInfoJson();

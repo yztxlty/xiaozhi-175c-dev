@@ -106,8 +106,7 @@ def test_pairing_loads_packaged_models_before_network_and_activates_after_wifi_e
 
     assert "assets.Apply();" in init
     assert init.index("assets.Apply();") < init.index("board.StartNetwork();")
-    assert "if (protocol_ == nullptr)" in connected
-    assert connected.index("if (protocol_ == nullptr)") < connected.index("if (state == kDeviceStateStarting")
+    assert "if (state == kDeviceStateStarting || protocol_ == nullptr)" in connected
 
 
 if __name__ == "__main__":
