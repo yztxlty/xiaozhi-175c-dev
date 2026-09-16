@@ -44,9 +44,10 @@ def test_activation_refreshes_connection_endpoints_before_protocol_start():
     refresh = task.index("while (ota_->CheckVersion() != ESP_OK)")
     mark_valid = task.index("ota_->MarkCurrentVersionValid();")
     confirm = task.index("ota_->ConfirmPendingUpgrade();")
+    ydp = task.index("YdpClient::GetInstance()")
     initialize = task.index("InitializeProtocol();")
 
-    assert refresh < mark_valid < confirm < initialize
+    assert refresh < mark_valid < confirm < ydp < initialize
     assert "Reuse local websocket/management endpoints" not in task
 
 
@@ -85,7 +86,15 @@ def test_wifi_join_enters_chat_idle_immediately_without_initializing_gate():
     assert "StartActivationIfNeeded" in connected
     assert "Lang::Strings::INITIALIZING" not in connected
     assert "LOADING_PROTOCOL" not in init
-    assert "YdpClient" not in task
+    assert "YdpClient::GetInstance()" in task
+    assert 'SetYdpEndpoint(CONFIG_YDP_ACTIVATION_BASE_URL)' in task
+    assert 'SetProductKey("ESP32S3")' in task
+    assert "SetKeyVersion(1)" in task
+    assert 'SetTransport("websocket")' in task
+    assert "ydp.Connect(" in task
+    assert "pdMS_TO_TICKS(30000)" in task
+    assert 'YDP auth v2 activate succeeded' in task
+    assert task.index("YdpClient::GetInstance()") < task.index("InitializeProtocol();")
     assert "EnterStandby()" in done
     assert "EnterConversationListening(" not in done
     assert "Lang::Strings::VERSION" not in done

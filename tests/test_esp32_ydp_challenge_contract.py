@@ -27,6 +27,8 @@ class Esp32YdpChallengeContractTests(unittest.TestCase):
         self.assertNotIn('"sessionToken"', source)
         self.assertIn('YdpBootstrap::GetInstance().Activate', client)
         self.assertIn('YdpBootstrap::GetInstance().Refresh', client)
+        self.assertIn('get_string("deviceNumber")', source)
+        self.assertIn('get_string("deviceId")', source)
 
 
 if __name__ == '__main__':

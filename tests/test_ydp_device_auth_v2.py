@@ -139,6 +139,9 @@ def test_firmware_sends_v2_fields_and_keeps_hardware_hmac():
     assert 'SetTransport' in client
     assert 'esp_hmac_calculate(HMAC_KEY0' in source
     assert 'HMAC_KEY0' in source
+    assert 'get_string("deviceNumber")' in source
+    assert 'get_string("deviceId")' in source
+    assert 'Activation identity mismatch' in source
 
 
 def test_auth_paths_never_log_keys_signatures_or_bodies():

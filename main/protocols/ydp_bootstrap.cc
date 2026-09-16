@@ -236,17 +236,23 @@ void YdpBootstrap::Prove(const std::string& ydp_endpoint, const char* purpose, c
         cJSON* item = cJSON_GetObjectItem(response_json, key);
         return cJSON_IsString(item) ? item->valuestring : "";
     };
-    credentials.device_number = get_string("deviceNumber");
+    const std::string response_device_number = get_string("deviceNumber");
+    const std::string response_device_id = get_string("deviceId");
     auto* expires_at = cJSON_GetObjectItem(response_json, "expireAt");
     if (cJSON_IsNumber(expires_at))
         credentials.expires_at = DecimalWithoutLeadingZeros(static_cast<long long>(expires_at->valuedouble));
 
     cJSON_Delete(response_json);
 
-    if (credentials.device_number != device_id) {
+    const bool number_matches = response_device_number == device_id;
+    const bool id_matches = response_device_id == device_id;
+    if (!number_matches && !id_matches) {
+        ESP_LOGW(kTag, "Activation identity mismatch local=%s deviceNumber=%s deviceId=%s",
+                 device_id.c_str(), response_device_number.c_str(), response_device_id.c_str());
         if (callback) callback(false, {}, "activation_response_invalid");
         return;
     }
+    credentials.device_number = device_id;
 
     ESP_LOGI(kTag, "Secure %s succeeded for device %s", purpose, device_id.c_str());
     if (callback) callback(true, credentials, "");
