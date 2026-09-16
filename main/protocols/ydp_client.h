@@ -16,8 +16,11 @@ public:
     void SetProductKey(const std::string& product_key);
     void SetDeviceId(const std::string& device_id);
     void SetAuthKey(const std::string& auth_key);
+    void SetKeyVersion(int key_version);
+    void SetTransport(const std::string& transport);
 
     void Connect(ConnectCallback callback);
+    void Refresh(ConnectCallback callback);
     void Disconnect();
     bool IsConnected() const { return connected_; }
 
@@ -31,7 +34,6 @@ private:
     std::string ydp_endpoint_;
     std::string product_key_;
     std::string device_id_;
-    std::string auth_key_;
 
     BootstrapConfig bootstrap_config_;
     ActivateCredentials activate_credentials_;

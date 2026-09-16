@@ -25,9 +25,16 @@ void YdpClient::SetDeviceId(const std::string& device_id) {
     YdpBootstrap::GetInstance().SetDeviceId(device_id);
 }
 
-void YdpClient::SetAuthKey(const std::string& auth_key) {
-    auth_key_ = auth_key;
-    YdpBootstrap::GetInstance().SetAuthKey(auth_key);
+void YdpClient::SetAuthKey(const std::string&) {
+    // Hardware HMAC only; plaintext keys are not retained or logged.
+}
+
+void YdpClient::SetKeyVersion(int key_version) {
+    YdpBootstrap::GetInstance().SetKeyVersion(key_version);
+}
+
+void YdpClient::SetTransport(const std::string& transport) {
+    YdpBootstrap::GetInstance().SetTransport(transport);
 }
 
 void YdpClient::Connect(ConnectCallback callback) {
@@ -62,6 +69,22 @@ void YdpClient::Connect(ConnectCallback callback) {
 
             if (callback) callback(true, "");
         });
+    });
+}
+
+void YdpClient::Refresh(ConnectCallback callback) {
+    ESP_LOGI(TAG, "Starting YDP credential refresh...");
+    YdpBootstrap::GetInstance().Refresh(ydp_endpoint_, [this, callback](bool success, const ActivateCredentials& credentials, const std::string& error) {
+        if (!success) {
+            ESP_LOGE(TAG, "YDP Refresh failed: %s", error.c_str());
+            if (callback) callback(false, "Refresh failed: " + error);
+            return;
+        }
+
+        ESP_LOGI(TAG, "YDP Refresh succeeded for device %s", credentials.device_number.c_str());
+        activate_credentials_ = credentials;
+        connected_ = true;
+        if (callback) callback(true, "");
     });
 }
 
