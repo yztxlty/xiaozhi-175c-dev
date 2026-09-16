@@ -14,7 +14,7 @@
 #include "device_content/gallery_store.h"
 #include "watch/watch_face_store.h"
 #include "ssid_manager.h"
-#include "ydp_bootstrap.h"
+#include "ydp_client.h"
 #include "wifi_board.h"
 #include "wifi_manager.h"
 #ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
@@ -394,6 +394,26 @@ void Application::ActivationTask() {
     // endpoints were already cached before the upgrade.
     ota_->MarkCurrentVersionValid();
     ota_->ConfirmPendingUpgrade();
+
+    auto& ydp = ygsoul::ydp::YdpClient::GetInstance();
+    ydp.SetYdpEndpoint(CONFIG_YDP_ACTIVATION_BASE_URL);
+    ydp.SetProductKey("ESP32S3");
+    ydp.SetKeyVersion(1);
+    ydp.SetTransport("websocket");
+    while (true) {
+        bool ydp_ok = false;
+        ydp.Connect([&](bool success, const std::string& error) {
+            ydp_ok = success;
+            if (!success) {
+                ESP_LOGW(TAG, "YDP auth v2 activate failed: %s, retry in 30 seconds", error.c_str());
+            }
+        });
+        if (ydp_ok) {
+            ESP_LOGI(TAG, "YDP auth v2 activate succeeded");
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(30000));
+    }
 
     // Initialize the protocol
     InitializeProtocol();
