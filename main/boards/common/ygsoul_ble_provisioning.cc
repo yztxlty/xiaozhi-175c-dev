@@ -122,6 +122,7 @@ std::string YgSoulBleProvisioning::GetPairingSessionId() {
 
 esp_err_t YgSoulBleProvisioning::Start() {
     if (started_) return ESP_OK;
+    if (!wifi_scan_.Open()) return ESP_ERR_INVALID_STATE;
     parser_ = new ygsoul::ble::BleFrameParser();
     g_service = this;
     const auto release_result = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
@@ -173,12 +174,14 @@ void YgSoulBleProvisioning::EnsureAdvertising() {
 
 void YgSoulBleProvisioning::Stop() {
     pairing_receipt_.CancelPending();
+    wifi_scan_.Close();
     if (!started_) return;
     if (wifi_connect_timeout_ != nullptr) {
         esp_timer_stop(wifi_connect_timeout_);
         esp_timer_delete(wifi_connect_timeout_);
         wifi_connect_timeout_ = nullptr;
     }
+    { std::lock_guard<std::mutex> lock(notify_mutex_); connected_ = false; notify_enabled_ = false; }
     esp_ble_gap_stop_advertising();
     if (gatts_if_ != ESP_GATT_IF_NONE) esp_ble_gatts_stop_service(g_handles[kService]);
     esp_bluedroid_disable();
@@ -219,14 +222,25 @@ void YgSoulBleProvisioning::GattsEvent(esp_gatts_cb_event_t event, esp_gatt_if_t
                          esp_err_to_name(esp_ble_gatts_start_service(g_handles[kService])));
             }
             break;
-        case ESP_GATTS_CONNECT_EVT:
+        case ESP_GATTS_CONNECT_EVT: {
+            std::lock_guard<std::mutex> lock(g_service->notify_mutex_);
             g_service->connected_ = true;
+            g_service->notify_enabled_ = false;
             g_service->advertising_ = false;
             g_service->connection_id_ = param->connect.conn_id;
+            if (g_service->parser_) g_service->parser_->Reset();
+            g_service->wifi_scan_.Reset();
             break;
+        }
         case ESP_GATTS_DISCONNECT_EVT:
-            g_service->connected_ = false;
+            {
+                std::lock_guard<std::mutex> lock(g_service->notify_mutex_);
+                g_service->connected_ = false;
+                g_service->notify_enabled_ = false;
+            }
             g_service->advertising_ = false;
+            if (g_service->parser_) g_service->parser_->Reset();
+            g_service->wifi_scan_.Reset();
             g_service->EnsureAdvertising();
             break;
         case ESP_GATTS_WRITE_EVT:
@@ -264,6 +278,11 @@ void YgSoulBleProvisioning::GapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_c
 }
 
 void YgSoulBleProvisioning::HandleWrite(esp_ble_gatts_cb_param_t* param) {
+    if (param->write.handle == g_handles[kNotifyCccd] && !param->write.is_prep && param->write.len == 2) {
+        std::lock_guard<std::mutex> lock(notify_mutex_);
+        notify_enabled_ = (param->write.value[0] & 0x01) != 0;
+        return;
+    }
     if (param->write.is_prep || param->write.handle != g_handles[kWriteValue] || !parser_) return;
     ESP_LOGI(kTag, "BLE write received: bytes=%u", param->write.len);
     std::vector<ygsoul::ble::Frame> frames;
@@ -311,14 +330,40 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
         cJSON_AddStringToObject(json, "modelCode", kProductKey);
         cJSON_AddStringToObject(json, "name", "YGSoul ESP32S3");
         cJSON_AddStringToObject(json, "status", netcfg_started_ ? "WIFI_CONFIGURING" : "READY");
+        cJSON_AddNumberToObject(json, "wifiScan", 1);
         char* text = cJSON_PrintUnformatted(json);
         Notify(ygsoul::ble::kDevInfoRsp, text);
         cJSON_free(text);
         cJSON_Delete(json);
         return;
     }
+    if (command == ygsoul::wifi_scan::kRequest) {
+        cJSON* json = cJSON_Parse(payload.c_str());
+        ygsoul::wifi_scan::Request request;
+        auto field = [json](const char* key) -> std::string {
+            auto* value = cJSON_GetObjectItemCaseSensitive(json, key);
+            return cJSON_IsString(value) && value->valuestring ? value->valuestring : "";
+        };
+        request.id = field("id");
+        request.scan = field("scan");
+        request.op = field("op");
+        auto* index = cJSON_GetObjectItemCaseSensitive(json, "index");
+        if (index) {
+            request.index = cJSON_IsNumber(index) && index->valuedouble >= -1 && index->valuedouble < 32 &&
+                index->valuedouble == index->valueint ? index->valueint : -2;
+        }
+        const auto response = wifi_scan_.Handle(request, !netcfg_started_ &&
+            static_cast<WifiBoard&>(Board::GetInstance()).IsInWifiConfigMode());
+        cJSON_Delete(json);
+        Notify(ygsoul::wifi_scan::kResponse, response);
+        return;
+    }
     if (command != ygsoul::ble::kWifiConfig) {
         ESP_LOGW(kTag, "BLE command rejected: %u", command);
+        return;
+    }
+    if (wifi_scan_.Busy()) {
+        SendStatus("FAILED", "WIFI_SCAN_BUSY");
         return;
     }
     std::string token;
@@ -356,12 +401,21 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
 }
 
 void YgSoulBleProvisioning::Notify(uint8_t command, const std::string& payload) {
-    if (!connected_) return;
+    // A frame must not interleave with a status notification from the Wi-Fi task.
+    std::lock_guard<std::mutex> lock(notify_mutex_);
+    if (!connected_ || !notify_enabled_ || payload.size() > ygsoul::ble::kMaxPayloadSize) return;
     const auto frame = ygsoul::ble::EncodeBleFrame(command, payload);
     for (size_t offset = 0; offset < frame.size(); offset += 20) {
         const auto length = std::min<size_t>(20, frame.size() - offset);
-        esp_ble_gatts_send_indicate(gatts_if_, connection_id_, notify_handle_, length,
+        const auto result = esp_ble_gatts_send_indicate(gatts_if_, connection_id_, notify_handle_, length,
                                     const_cast<uint8_t*>(frame.data() + offset), false);
+        if (result != ESP_OK) {
+            // Never treat a partial frame as success or append a second frame to
+            // it. Reset the link; the client will discard this scan and reconnect.
+            ESP_LOGW(kTag, "BLE notify failed: %s", esp_err_to_name(result));
+            esp_ble_gatts_close(gatts_if_, connection_id_);
+            return;
+        }
     }
 }
 
