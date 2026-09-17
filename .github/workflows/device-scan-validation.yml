@@ -1,0 +1,34 @@
+name: Device Scan Validation
+on:
+  push:
+    branches: [feature/esp32-device-wifi-scan-20260917]
+  pull_request:
+    paths:
+      - 'main/boards/common/ygsoul*'
+      - 'tests/**'
+      - '.github/workflows/device-scan-validation.yml'
+permissions:
+  contents: read
+jobs:
+  host-protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive protocol sources
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, tarfile
+          with tarfile.open(os.environ['RUNNER_TEMP'] + '/firmware-review.tgz', 'w:gz') as output:
+              for name in ['AGENTS.md', 'main/boards/common', 'tests', 'main/idf_component.yml', 'main/CMakeLists.txt', 'CMakeLists.txt', 'sdkconfig.defaults', '.github/workflows']:
+                  if pathlib.Path(name).exists(): output.add(name)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-review-${{ github.sha }}
+          path: ${{ runner.temp }}/firmware-review.tgz
+          retention-days: 3
+      - name: Host protocol regressions (not an ESP-IDF build)
+        run: |
+          python3 tests/test_device_wifi_scan.py
+          python3 tests/test_pairing_receipt.py
