@@ -9,6 +9,7 @@
 #include "esp_gatts_api.h"
 #include "esp_timer.h"
 #include "ygsoul_ble_protocol.h"
+#include "ygsoul_wifi_scan.h"
 
 class YgSoulBleProvisioning {
 public:
@@ -39,6 +40,9 @@ private:
     uint16_t connection_id_ = 0;
     uint16_t notify_handle_ = 0;
     ygsoul::ble::PairingReceipt pairing_receipt_;
+    YgSoulWifiScan wifi_scan_;
+    std::mutex notify_mutex_;
+    bool notify_enabled_ = false;
     bool candidate_saved_ = false;
     std::vector<SsidItem> previous_ssids_;
     esp_timer_handle_t wifi_connect_timeout_ = nullptr;
