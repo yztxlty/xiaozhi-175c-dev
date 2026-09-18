@@ -236,7 +236,11 @@ void YdpBootstrap::Prove(const std::string& ydp_endpoint, const char* purpose, c
         cJSON* item = cJSON_GetObjectItem(response_json, key);
         return cJSON_IsString(item) ? item->valuestring : "";
     };
+    // MQTT voucher uses deviceNumber; websocket voucher historically used deviceId.
     credentials.device_number = get_string("deviceNumber");
+    if (credentials.device_number.empty()) {
+        credentials.device_number = get_string("deviceId");
+    }
     auto* expires_at = cJSON_GetObjectItem(response_json, "expireAt");
     if (cJSON_IsNumber(expires_at))
         credentials.expires_at = DecimalWithoutLeadingZeros(static_cast<long long>(expires_at->valuedouble));
@@ -244,6 +248,8 @@ void YdpBootstrap::Prove(const std::string& ydp_endpoint, const char* purpose, c
     cJSON_Delete(response_json);
 
     if (credentials.device_number != device_id) {
+        ESP_LOGE(kTag, "Activate response device mismatch got=%s want=%s",
+                 credentials.device_number.c_str(), device_id.c_str());
         if (callback) callback(false, {}, "activation_response_invalid");
         return;
     }

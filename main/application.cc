@@ -5,6 +5,7 @@
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
 #include "websocket_protocol.h"
+#include "protocols/ydp_client.h"
 #include "device_management_client.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
@@ -394,6 +395,41 @@ void Application::ActivationTask() {
     // endpoints were already cached before the upgrade.
     ota_->MarkCurrentVersionValid();
     ota_->ConfirmPendingUpgrade();
+
+    // YGSoul Device Auth v2: prove identity before opening chat/management channels.
+    {
+        auto& ydp = ygsoul::ydp::YdpClient::GetInstance();
+        ydp.SetYdpEndpoint(CONFIG_YDP_ACTIVATION_BASE_URL);
+        ydp.SetProductKey("ESP32S3");
+        ydp.SetKeyVersion(1);
+        ydp.SetTransport("websocket");
+        bool ydp_ok = false;
+        std::string ydp_error;
+        ydp.Connect([&](bool success, const std::string& error) {
+            ydp_ok = success;
+            ydp_error = error;
+        });
+        if (!ydp_ok) {
+            ESP_LOGE(TAG, "YDP auth v2 failed: %s", ydp_error.c_str());
+            // Keep retrying so USB联调 can see repeated evidence instead of silently skipping.
+            while (true) {
+                vTaskDelay(pdMS_TO_TICKS(30000));
+                ydp_ok = false;
+                ydp_error.clear();
+                ydp.Connect([&](bool success, const std::string& error) {
+                    ydp_ok = success;
+                    ydp_error = error;
+                });
+                if (ydp_ok) {
+                    ESP_LOGI(TAG, "YDP auth v2 recovered");
+                    break;
+                }
+                ESP_LOGE(TAG, "YDP auth v2 retry failed: %s", ydp_error.c_str());
+            }
+        } else {
+            ESP_LOGI(TAG, "YDP auth v2 activate succeeded");
+        }
+    }
 
     // Initialize the protocol
     InitializeProtocol();
