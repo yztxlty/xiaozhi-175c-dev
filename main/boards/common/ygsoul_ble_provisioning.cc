@@ -330,32 +330,36 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
         cJSON_AddStringToObject(json, "modelCode", kProductKey);
         cJSON_AddStringToObject(json, "name", "YGSoul ESP32S3");
         cJSON_AddStringToObject(json, "status", netcfg_started_ ? "WIFI_CONFIGURING" : "READY");
-        cJSON_AddNumberToObject(json, "wifiScan", 1);
+        // Unified scan capability (A100_OPEN spec V1.0): all products use wifiScanVersion=1 + 0x16/0x17.
+        cJSON_AddNumberToObject(json, "wifiScanVersion", 1);
         char* text = cJSON_PrintUnformatted(json);
         Notify(ygsoul::ble::kDevInfoRsp, text);
         cJSON_free(text);
         cJSON_Delete(json);
         return;
     }
-    if (command == ygsoul::wifi_scan::kRequest) {
+    if (command == ygsoul::wifi_scan::kRequest || command == ygsoul::wifi_scan::kResponse) {
+        // Unified 0x16 START / 0x17 GET — payload is A100 V1.0 JSON.
         cJSON* json = cJSON_Parse(payload.c_str());
         ygsoul::wifi_scan::Request request;
         auto field = [json](const char* key) -> std::string {
             auto* value = cJSON_GetObjectItemCaseSensitive(json, key);
             return cJSON_IsString(value) && value->valuestring ? value->valuestring : "";
         };
-        request.id = field("id");
-        request.scan = field("scan");
-        request.op = field("op");
+        request.scan_id = field("scanId");
+        request.start = (command == ygsoul::wifi_scan::kRequest);
         auto* index = cJSON_GetObjectItemCaseSensitive(json, "index");
-        if (index) {
-            request.index = cJSON_IsNumber(index) && index->valuedouble >= -1 && index->valuedouble < 32 &&
-                index->valuedouble == index->valueint ? index->valueint : -2;
+        if (cJSON_IsNumber(index) && index->valuedouble >= 0 && index->valuedouble < 30 &&
+            index->valuedouble == index->valueint) {
+            request.index = index->valueint;
+        } else {
+            request.index = request.start ? 0 : -1;
         }
         const auto response = wifi_scan_.Handle(request, !netcfg_started_ &&
             static_cast<WifiBoard&>(Board::GetInstance()).IsInWifiConfigMode());
         cJSON_Delete(json);
-        Notify(ygsoul::wifi_scan::kResponse, response);
+        // Spec V1.0: reply CMD equals request CMD (0x16 or 0x17).
+        Notify(command, response);
         return;
     }
     if (command != ygsoul::ble::kWifiConfig) {
