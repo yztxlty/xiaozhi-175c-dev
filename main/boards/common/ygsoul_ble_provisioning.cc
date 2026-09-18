@@ -33,10 +33,10 @@ uint16_t g_handles[kCount]{};
 uint16_t g_serviceUuid = ygsoul::ble::kServiceUuid;
 // ESP-IDF requires a 16-byte UUID-shaped buffer for service advertising.
 // Keep the service in the primary packet and put the longer name in scan rsp.
-uint8_t g_advertisedServiceUuid[16] = {
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0x10, 0x19, 0x00, 0x00,
-};
+// 16-bit service UUID 0x1910 (little-endian) fits with Complete Local Name
+// inside the 31-byte primary ADV. The previous 128-bit UUID forced
+// include_name=false so WeChat often never saw YGSOUL-* until Scan RSP.
+uint8_t g_advertisedServiceUuid16[2] = { 0x10, 0x19 };
 bool g_adv_data_ready = false;
 bool g_scan_rsp_ready = false;
 uint16_t g_primaryServiceUuid = ESP_GATT_UUID_PRI_SERVICE;
@@ -67,7 +67,7 @@ const esp_gatts_attr_db_t kGattDb[kCount] = {
 
 esp_ble_adv_data_t kAdvData = {
     .set_scan_rsp = false,
-    .include_name = false,
+    .include_name = true,
     .include_txpower = false,
     .min_interval = 0x20,
     .max_interval = 0x40,
@@ -76,8 +76,9 @@ esp_ble_adv_data_t kAdvData = {
     .p_manufacturer_data = nullptr,
     .service_data_len = 0,
     .p_service_data = nullptr,
-    .service_uuid_len = sizeof(g_advertisedServiceUuid),
-    .p_service_uuid = g_advertisedServiceUuid,
+    // Name-only primary ADV: include_name + service UUID returned ESP_ERR_INVALID_ARG.
+    .service_uuid_len = 0,
+    .p_service_uuid = nullptr,
     .flag = ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT,
 };
 esp_ble_adv_data_t kScanRspData = {
@@ -91,8 +92,8 @@ esp_ble_adv_data_t kScanRspData = {
     .p_manufacturer_data = nullptr,
     .service_data_len = 0,
     .p_service_data = nullptr,
-    .service_uuid_len = 0,
-    .p_service_uuid = nullptr,
+    .service_uuid_len = sizeof(g_advertisedServiceUuid16),
+    .p_service_uuid = g_advertisedServiceUuid16,
     .flag = 0,
 };
 esp_ble_adv_params_t kAdvParams = {
@@ -207,6 +208,7 @@ void YgSoulBleProvisioning::GattsEvent(esp_gatts_cb_event_t event, esp_gatt_if_t
                 const auto device_name = std::string("YGSOUL-") + SystemInfo::GetMacAddress().substr(9);
                 ESP_LOGI(kTag, "GATT registered: if=%d name=%s", gatts_if, device_name.c_str());
                 ESP_LOGI(kTag, "set device name: %s", esp_err_to_name(esp_ble_gap_set_device_name(device_name.c_str())));
+                ESP_LOGI(kTag, "adv payload: uuid16=0x1910 include_name=1 name=%s", device_name.c_str());
                 ESP_LOGI(kTag, "config advertising: %s", esp_err_to_name(esp_ble_gap_config_adv_data(&kAdvData)));
                 ESP_LOGI(kTag, "config scan response: %s", esp_err_to_name(esp_ble_gap_config_adv_data(&kScanRspData)));
             }
@@ -476,5 +478,6 @@ void YgSoulBleProvisioning::FailProvisioning(const char* code) {
     previous_ssids_.clear();
     netcfg_started_ = false;
     SendStatus("FAILED", code);
-    // Keep BLE provisioning available for an immediate retry.
+    // Keep BLE advertising so the phone can retry without a power cycle.
+    EnsureAdvertising();
 }
