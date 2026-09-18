@@ -85,7 +85,8 @@ def test_wifi_join_enters_chat_idle_immediately_without_initializing_gate():
     assert "StartActivationIfNeeded" in connected
     assert "Lang::Strings::INITIALIZING" not in connected
     assert "LOADING_PROTOCOL" not in init
-    assert "YdpClient" not in task
+    # Device Auth v2 runs in ActivationTask after endpoint fetch; chat/protocol stay gated.
+    assert "YdpClient" in task
     assert "EnterStandby()" in done
     assert "EnterConversationListening(" not in done
     assert "Lang::Strings::VERSION" not in done
