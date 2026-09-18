@@ -23,6 +23,10 @@ grep -q 'strcmp(command->valuestring, "unbind") == 0' main/application.cc
 grep -q 'strcmp(command->valuestring, "factoryReset") == 0' main/application.cc
 grep -q 'cJSON_AddBoolToObject(reported, "unbound", true)' main/application.cc
 grep -q 'cJSON_AddBoolToObject(reported, "factoryReset", true)' main/application.cc
-grep -q 'CONFIG_OTA_URL="https://yomitest.gwcz.online/ydp/v1/ota/xiaozhi/check"' sdkconfig.175c
+grep -q 'CONFIG_OTA_URL="https://yomitest.gwcz.online/ydp/v1/ota/ygsoul/check"' sdkconfig.175c
+grep -q 'CONFIG_OTA_URL="https://yomitest.gwcz.online/ydp/v1/ota/ygsoul/check"' sdkconfig
+! grep -Eq '/(ydp/v1/)?(ota/)?xiaozhi(/|$)' sdkconfig.175c
+grep -q 'default "https://yomitest.gwcz.online/ydp/v1/ota/ygsoul/check"' main/Kconfig.projbuild
+! grep -R -E 'CONFIG_OTA_URL=.*xiaozhi|default "https?://[^" ]*/xiaozhi/ota' main/Kconfig.projbuild main/boards
 ! grep -q 'api.tenclass.net' sdkconfig.175c
 echo "YGSoul firmware version contract passed"
