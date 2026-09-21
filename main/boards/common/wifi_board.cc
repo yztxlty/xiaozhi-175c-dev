@@ -416,6 +416,19 @@ std::string WifiBoard::GetDeviceStatusJson() {
         cJSON_AddStringToObject(root, "roleVisualResourceId", role_visual_resource_id.c_str());
         cJSON_AddNumberToObject(root, "roleVisualVersion", role_visual_version);
     }
+    auto capability = cJSON_AddObjectToObject(root, "roleAnimation");
+    cJSON_AddNumberToObject(capability, "protocolVersion", 1);
+    auto actions = cJSON_AddArrayToObject(capability, "supportedActions");
+    cJSON_AddStringToArray(actions, "listening");
+    cJSON_AddStringToArray(actions, "speaking");
+    auto formats = cJSON_AddArrayToObject(capability, "formats");
+    cJSON_AddStringToArray(formats, "eaf");
+    cJSON_AddNumberToObject(capability, "width", 466);
+    cJSON_AddNumberToObject(capability, "height", 466);
+    cJSON_AddNumberToObject(capability, "maxFps", 10);
+    cJSON_AddNumberToObject(capability, "maxFileBytes", 192 * 1024);
+    cJSON_AddNumberToObject(capability, "maxActions", 2);
+    cJSON_AddBoolToObject(capability, "atomicApply", true);
 
     // Audio speaker
     auto audio_speaker = cJSON_CreateObject();

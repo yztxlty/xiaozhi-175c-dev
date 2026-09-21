@@ -1683,6 +1683,43 @@ public:
         ShowYGSoulCompanion();
     }
 
+    virtual bool ValidateRoleImage(const char* path, const char* format = "jpg") override {
+        if (path == nullptr || format == nullptr || strcmp(format, "eaf") != 0 || !IsSetupUICalled()) return false;
+        FILE* file = fopen(path, "rb");
+        if (file == nullptr || fseek(file, 0, SEEK_END) != 0) {
+            if (file != nullptr) fclose(file);
+            return false;
+        }
+        const long size = ftell(file);
+        if (size <= 0 || size > 192 * 1024 || fseek(file, 0, SEEK_SET) != 0) {
+            fclose(file);
+            return false;
+        }
+        void* data = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (data == nullptr || fread(data, 1, size, file) != static_cast<size_t>(size)) {
+            if (data != nullptr) heap_caps_free(data);
+            fclose(file);
+            return false;
+        }
+        fclose(file);
+        bool loaded = false;
+        try {
+            auto asset = std::make_unique<LvglRawImage>(data, static_cast<size_t>(size));
+            DisplayLockGuard lock(this);
+            if (lock) {
+                lv_obj_t* probe = lv_eaf_create(lv_screen_active());
+                lv_obj_add_flag(probe, LV_OBJ_FLAG_HIDDEN);
+                lv_eaf_set_src(probe, asset->image_dsc());
+                loaded = lv_eaf_is_loaded(probe);
+                lv_obj_delete(probe);
+            }
+        } catch (...) {
+            loaded = false;
+        }
+        heap_caps_free(data);
+        return loaded;
+    }
+
     virtual bool SetRoleImage(const char* path, const char* format = "jpg") override {
         if (path == nullptr || !IsSetupUICalled() || ygsoul_image_ == nullptr) {
             return false;

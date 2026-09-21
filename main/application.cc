@@ -12,6 +12,7 @@
 #include "assets.h"
 #include "settings.h"
 #include "device_content/role_visual_store.h"
+#include "device_content/role_animation_store.h"
 #include "device_content/gallery_store.h"
 #include "watch/watch_face_store.h"
 #include "ssid_manager.h"
@@ -88,6 +89,7 @@ void Application::Initialize() {
     auto display = board.GetDisplay();
     display->SetupUI();
     RoleVisualStore::GetInstance().LoadActive();
+    RoleAnimationStore::GetInstance().Load();
     Settings companion_settings("companion", false);
     show_asr_text_ = companion_settings.GetInt("show_asr", 1) != 0;
     show_tts_text_ = companion_settings.GetInt("show_tts", 1) != 0;
@@ -847,6 +849,17 @@ void Application::HandleCustomMessage(const cJSON* root) {
         } else {
             error_code = "invalid_params";
         }
+    } else if (strcmp(command->valuestring, "applyRoleAnimations") == 0) {
+        auto params = cJSON_GetObjectItem(payload, "params");
+        const bool restore_low_power = GetDeviceState() == kDeviceStateIdle;
+        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        board.GetDisplay()->PrepareGalleryDownload();
+        succeeded = RoleAnimationStore::GetInstance().Apply(params, request_id->valuestring);
+        if (restore_low_power) board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        command_changes_telemetry = succeeded;
+        if (!succeeded) error_code = "role_animation_apply_failed";
+    } else if (strcmp(command->valuestring, "getRoleAnimations") == 0) {
+        succeeded = true;
     } else if (strcmp(command->valuestring, "commitActiveRole") == 0) {
         auto params = cJSON_GetObjectItem(payload, "params");
         auto role_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "roleId") : nullptr;
@@ -862,6 +875,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
                 role_id->valuestring, resource_id->valuestring,
                 resource_version->valueint, revision->valueint);
             if (succeeded) {
+                RoleAnimationStore::GetInstance().ClearForRoleChange(role_id->valuestring);
                 Settings companion("companion", true);
                 if (cJSON_IsString(voice_profile_id)) {
                     voice_session_refresh_required = companion.GetString("voice_profile") != voice_profile_id->valuestring;
@@ -894,6 +908,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
                 role_id->valuestring, role_visual_resource_id->valuestring,
                 role_visual_version->valueint, configuration_revision->valueint);
             if (succeeded) {
+                RoleAnimationStore::GetInstance().ClearForRoleChange(role_id->valuestring);
                 Settings companion("companion", true);
                 if (cJSON_IsString(voice_profile_id)) {
                     voice_session_refresh_required = companion.GetString("voice_profile") != voice_profile_id->valuestring;
@@ -908,6 +923,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
             if (!succeeded) error_code = "role_commit_failed";
         } else if (cJSON_IsString(role_id) && role_id->valuestring[0] != '\0'
                 && cJSON_IsString(voice_profile_id) && voice_profile_id->valuestring[0] != '\0') {
+            RoleAnimationStore::GetInstance().ClearForRoleChange(role_id->valuestring);
             Settings companion("companion", true);
             companion.SetString("active_role", role_id->valuestring);
             voice_session_refresh_required = companion.GetString("voice_profile") != voice_profile_id->valuestring;
@@ -981,6 +997,12 @@ void Application::HandleCustomMessage(const cJSON* root) {
     }
     auto reported = cJSON_Parse(board.GetDeviceStatusJson().c_str());
     if (reported != nullptr) {
+        if (succeeded && strcmp(command->valuestring, "applyRoleAnimations") == 0) {
+            RoleAnimationStore::GetInstance().AddReported(reported, request_id->valuestring);
+        }
+        if (succeeded && strcmp(command->valuestring, "getRoleAnimations") == 0) {
+            RoleAnimationStore::GetInstance().AddReported(reported);
+        }
         if (succeeded && strcmp(command->valuestring, "prepareRoleVisual") == 0) {
             auto params = cJSON_GetObjectItem(payload, "params");
             auto resource_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "resourceId") : nullptr;
@@ -1461,6 +1483,7 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+            RoleAnimationStore::GetInstance().Restore();
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
@@ -1468,13 +1491,14 @@ void Application::HandleStateChangedEvent() {
             audio_service_.EnableWakeWordDetection(!music_player_visible_.load());
             break;
         case kDeviceStateConnecting:
+            RoleAnimationStore::GetInstance().Restore();
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
-            display->SetEmotion("neutral");
+            if (!RoleAnimationStore::GetInstance().Show("listening")) display->SetEmotion("neutral");
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -1505,6 +1529,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            RoleAnimationStore::GetInstance().Show("speaking");
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
