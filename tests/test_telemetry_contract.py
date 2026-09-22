@@ -44,7 +44,7 @@ def test_voice_mcp_controls_report_telemetry_immediately():
     assert 'Application::GetInstance().ReportDeviceTelemetry();' in brightness
 
 
-def test_management_commands_ack_unbind_then_wipes_wifi_and_enters_pairing():
+def test_management_commands_ack_unbind_then_wipes_wifi_and_reboots_into_pairing():
     source = (ROOT / "main/application.cc").read_text()
     assert 'strcmp(command->valuestring, "unbind") == 0' in source
     assert 'cJSON_AddBoolToObject(reported, "unbound", true)' in source
@@ -59,8 +59,9 @@ def test_management_commands_ack_unbind_then_wipes_wifi_and_enters_pairing():
     assert 'SsidManager::GetInstance().Clear()' in unbind_after_ack
     assert 'wifi_settings.EraseAll()' in unbind_after_ack
     assert 'WifiManager::GetInstance().StopStation()' in unbind_after_ack
-    assert 'EnterWifiConfigMode()' in unbind_after_ack
-    assert 'Reboot();' not in unbind_after_ack
+    assert 'wifi_settings.SetBool("pair_pending", true)' in unbind_after_ack
+    assert 'Application::GetInstance().Reboot();' in unbind_after_ack
+    assert 'EnterWifiConfigMode()' not in unbind_after_ack
 
 
 def test_management_commands_factory_reset_reboots_after_wiping_wifi():

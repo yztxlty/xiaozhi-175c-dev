@@ -12,6 +12,18 @@ config YDP_ACTIVATION_BASE_URL
     help
         Device-only HTTPS base URL for Challenge and Activate. The device HMAC key is in eFuse.
 
+config YGSOUL_TLS_DIRECT_HOST
+    string "YGSoul TLS direct-connect host"
+    default ""
+    help
+        Optional host that bypasses proxy fake-IP DNS while retaining hostname TLS verification.
+
+config YGSOUL_TLS_DIRECT_IP
+    string "YGSoul TLS direct-connect IP"
+    default ""
+    help
+        Direct IP for YGSOUL_TLS_DIRECT_HOST. Empty disables direct connection.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE
@@ -136,7 +148,7 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_WIFI_CAM
         bool "Bread Compact WiFi + LCD + Camera (面包板)"
-        depends on IDF_TARGET_ESP32S3     
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_ML307
         bool "Bread Compact ML307/EC801E (面包板 4G)"
         depends on IDF_TARGET_ESP32S3
@@ -634,7 +646,7 @@ endchoice
 choice DISPLAY_ESP32S3_TOUCH_LCD_1_85C
     depends on BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C
     prompt "ESP32S3_TOUCH_LCD_1_85C version"
-    default VERSION_2_0 
+    default VERSION_2_0
     help
         hardware version
     config VERSION_1_0

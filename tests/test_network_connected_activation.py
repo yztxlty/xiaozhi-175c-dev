@@ -17,6 +17,7 @@ enum State { kDeviceStateStarting, kDeviceStateWifiConfiguring,
              kDeviceStateListening, kDeviceStateSpeaking };
 struct Display { void UpdateStatusBar(bool) {} };
 struct Protocol { bool closed = false; void CloseAudioChannel() { closed = true; } };
+struct ManagementClient { bool Start() { return true; } };
 struct Board {
     static Board& GetInstance() { static Board board; return board; }
     Display* GetDisplay() { static Display display; return &display; }
@@ -24,12 +25,13 @@ struct Board {
 struct Application {
     State state;
     Protocol* protocol_;
-    void* management_client_;
+    ManagementClient* management_client_;
     int activations = 0;
     State GetDeviceState() { return state; }
         void SetDeviceState(State next) { state = next; }
         void StartActivationIfNeeded() { ++activations; }
         void StartNetworkTimeSync() {}
+        bool ReportPairingReceipt() { return true; }
         void ReportDeviceUplink(const char*, const char* = nullptr) {}
     void HandleNetworkConnectedEvent();
     void HandleNetworkDisconnectedEvent();
@@ -59,13 +61,14 @@ int main() {
     assert(pairing.activations == 1);
     // 已验收的待命/聆听/说话在重连时不得重新初始化或改变状态。
     Protocol existing;
+    ManagementClient management;
     for (auto state : {kDeviceStateIdle, kDeviceStateListening, kDeviceStateSpeaking}) {
-        Application reconnect{state, &existing, &existing};
+        Application reconnect{state, &existing, &management};
         reconnect.HandleNetworkConnectedEvent();
         assert(reconnect.activations == 0);
         assert(reconnect.state == state);
     }
-    Application listening{kDeviceStateListening, &existing, &existing};
+    Application listening{kDeviceStateListening, &existing, &management};
     listening.HandleNetworkDisconnectedEvent();
     assert(existing.closed);
 }

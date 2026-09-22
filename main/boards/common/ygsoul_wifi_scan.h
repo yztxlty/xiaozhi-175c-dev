@@ -68,7 +68,7 @@ private:
     void ResetLocked() {
         ++generation_;
         scan_id_.clear();
-        rows_.clear();
+        std::vector<ygsoul::wifi_scan::AccessPoint>().swap(rows_);
         state_ = ygsoul::wifi_scan::State::Idle;
         error_ = ygsoul::wifi_scan::Error::None;
         truncated_ = false;

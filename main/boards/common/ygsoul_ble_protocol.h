@@ -15,6 +15,7 @@ constexpr uint8_t kQueryDevInfo = 0x01;
 constexpr uint8_t kDevInfoRsp = 0x02;
 constexpr uint8_t kWifiConfig = 0x03;
 constexpr uint8_t kNetcfgResult = 0x04;
+constexpr uint8_t kCancelWifiConfig = 0x07;
 constexpr size_t kMaxPayloadSize = 238;
 
 struct Frame {
@@ -22,14 +23,23 @@ struct Frame {
     std::string payload;
 };
 
+struct WifiConfig {
+    std::string token;
+    std::string ssid;
+    std::string password;
+};
+
+bool ParseWifiConfigPayload(const std::string& payload, WifiConfig& config);
+
 // 仅保存会话 UUID，不保留配网令牌；跨 BLE/Wi-Fi/主线程读写均复制后解锁。
 class PairingReceipt {
 public:
     enum class Result { Ignored, Matched, Mismatch };
-    void Begin(const std::string& token, const std::string& ssid);
+    bool Begin(const std::string& token, const std::string& ssid);
     void StartWaiting();
     Result Complete(const std::string& ssid);
     bool CancelPending();
+    void Reset();
     void RestoreCompleted(const std::string& session_id);
     std::string SessionId() const;
 

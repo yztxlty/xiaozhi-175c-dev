@@ -13,6 +13,7 @@
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "application.h"
+#include "display.h"
 #include "settings.h"
 #include "ssid_manager.h"
 #include "system_info.h"
@@ -23,8 +24,10 @@
 namespace {
 constexpr char kTag[] = "YGSoulBLE";
 constexpr char kProductKey[] = "ESP32S3";
-constexpr char kPairingReceiptSettingsNamespace[] = "pairing";
+constexpr char kWifiSettingsNamespace[] = "wifi";
+constexpr char kLegacyPairingReceiptSettingsNamespace[] = "pairing";
 constexpr char kPairingReceiptKey[] = "session_id";
+constexpr char kWifiPairingReceiptKey[] = "pair_session";
 constexpr uint64_t kWifiConnectTimeoutUs = 45ULL * 1000 * 1000;
 constexpr uint16_t kAppId = 0x42;
 enum AttributeIndex { kService, kWriteDecl, kWriteValue, kNotifyDecl, kNotifyValue, kNotifyCccd, kCount };
@@ -112,17 +115,29 @@ YgSoulBleProvisioning& YgSoulBleProvisioning::GetInstance() {
 }
 
 std::string YgSoulBleProvisioning::GetPairingSessionId() {
+    std::lock_guard<std::mutex> lock(provisioning_mutex_);
     auto pairing_session_id = pairing_receipt_.SessionId();
     if (!pairing_session_id.empty()) return pairing_session_id;
-    Settings settings(kPairingReceiptSettingsNamespace, true);
-    pairing_session_id = settings.GetString(kPairingReceiptKey);
-    settings.EraseKey(kPairingReceiptKey);
+    pairing_session_id = Settings(kWifiSettingsNamespace, true).GetString(kWifiPairingReceiptKey);
+    if (pairing_session_id.empty()) {
+        pairing_session_id = Settings(kLegacyPairingReceiptSettingsNamespace, true)
+            .GetString(kPairingReceiptKey);
+    }
     pairing_receipt_.RestoreCompleted(pairing_session_id);
     return pairing_receipt_.SessionId();
 }
 
 esp_err_t YgSoulBleProvisioning::Start() {
+    std::lock_guard<std::mutex> lock(provisioning_mutex_);
     if (started_) return ESP_OK;
+    pairing_receipt_.Reset();
+    Settings(kWifiSettingsNamespace, true).EraseKey(kWifiPairingReceiptKey);
+    Settings(kLegacyPairingReceiptSettingsNamespace, true).EraseKey(kPairingReceiptKey);
+    netcfg_started_ = false;
+    candidate_saved_ = false;
+    previous_ssids_.clear();
+    merged_ssids_.clear();
+    attempt_deadline_us_ = 0;
     if (!wifi_scan_.Open()) return ESP_ERR_INVALID_STATE;
     parser_ = new ygsoul::ble::BleFrameParser();
     g_service = this;
@@ -174,9 +189,32 @@ void YgSoulBleProvisioning::EnsureAdvertising() {
 }
 
 void YgSoulBleProvisioning::Stop() {
-    pairing_receipt_.CancelPending();
+    bool was_started = false;
+    bool restore_candidate = false;
+    std::vector<SsidItem> previous_ssids;
+    {
+        std::lock_guard<std::mutex> operation_lock(wifi_operation_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(provisioning_mutex_);
+            pairing_receipt_.CancelPending();
+            attempt_deadline_us_ = 0;
+            if (wifi_connect_timeout_ != nullptr) esp_timer_stop(wifi_connect_timeout_);
+            restore_candidate = candidate_saved_;
+            previous_ssids = previous_ssids_;
+            candidate_saved_ = false;
+            previous_ssids_.clear();
+            merged_ssids_.clear();
+            netcfg_started_ = false;
+            was_started = started_;
+            started_ = false;
+        }
+        if (restore_candidate) {
+            WifiManager::GetInstance().StopStation();
+            SsidManager::GetInstance().ReplaceSsidList(previous_ssids, false);
+        }
+    }
     wifi_scan_.Close();
-    if (!started_) return;
+    if (!was_started) return;
     if (wifi_connect_timeout_ != nullptr) {
         esp_timer_stop(wifi_connect_timeout_);
         esp_timer_delete(wifi_connect_timeout_);
@@ -191,9 +229,7 @@ void YgSoulBleProvisioning::Stop() {
     esp_bt_controller_deinit();
     delete parser_;
     parser_ = nullptr;
-    started_ = connected_ = advertising_ = netcfg_started_ = false;
-    candidate_saved_ = false;
-    previous_ssids_.clear();
+    connected_ = advertising_ = false;
     gatts_if_ = ESP_GATT_IF_NONE;
     g_service = nullptr;
 }
@@ -243,7 +279,10 @@ void YgSoulBleProvisioning::GattsEvent(esp_gatts_cb_event_t event, esp_gatt_if_t
             g_service->advertising_ = false;
             if (g_service->parser_) g_service->parser_->Reset();
             g_service->wifi_scan_.Reset();
-            g_service->EnsureAdvertising();
+            {
+                std::lock_guard<std::mutex> lock(g_service->provisioning_mutex_);
+                if (!g_service->netcfg_started_) g_service->EnsureAdvertising();
+            }
             break;
         case ESP_GATTS_WRITE_EVT:
             g_service->HandleWrite(param);
@@ -266,9 +305,14 @@ void YgSoulBleProvisioning::GapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_c
         ESP_LOGI(kTag, "start advertising after data: %s",
                  esp_err_to_name(esp_ble_gap_start_advertising(&kAdvParams)));
     } else if (event == ESP_GAP_BLE_ADV_START_COMPLETE_EVT) {
+        const bool ready = param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS;
         if (g_service != nullptr) {
-            g_service->advertising_ = param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS;
+            g_service->advertising_ = ready;
         }
+        Application::GetInstance().Schedule([ready]() {
+            Board::GetInstance().GetDisplay()->SetChatMessage(
+                "system", ready ? "BLE 配网广播已开启" : "BLE 配网启动失败，正在重试");
+        });
         ESP_LOGI(kTag, "advertising start result: status=%d", param->adv_start_cmpl.status);
     } else if (event == ESP_GAP_BLE_SEC_REQ_EVT) {
         ESP_LOGI(kTag, "security request: %s",
@@ -295,43 +339,29 @@ void YgSoulBleProvisioning::HandleWrite(esp_ble_gatts_cb_param_t* param) {
     }
 }
 
-namespace {
-bool ParseWifiConfig(const std::string& payload, std::string& token, std::string& ssid, std::string& password) {
-    size_t index = 0;
-    auto next = [&](std::string& out) {
-        if (index >= payload.size()) return false;
-        const auto length = static_cast<uint8_t>(payload[index++]);
-        if (index + length > payload.size()) return false;
-        out.assign(payload.data() + index, length);
-        index += length;
-        return true;
-    };
-    std::string first;
-    std::string second;
-    if (!next(first) || !next(second)) return false;
-    if (index == payload.size()) {
-        ssid = first;
-        password = second;
-        return !ssid.empty();
-    }
-    std::string third;
-    if (!next(third) || index != payload.size()) return false;
-    token = first;
-    ssid = second;
-    password = third;
-    return !token.empty() && !ssid.empty();
-}
-}
-
 void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payload) {
     if (command == ygsoul::ble::kQueryDevInfo) {
+        std::string provisioning_status;
+        std::string provisioning_error_code;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            provisioning_status = provisioning_status_;
+            provisioning_error_code = provisioning_error_code_;
+        }
+        bool netcfg_started = false;
+        {
+            std::lock_guard<std::mutex> lock(provisioning_mutex_);
+            netcfg_started = netcfg_started_;
+        }
         cJSON* json = cJSON_CreateObject();
         const auto mac = SystemInfo::GetMacAddress();
         cJSON_AddStringToObject(json, "vendorSn", mac.c_str());
         cJSON_AddStringToObject(json, "productKey", kProductKey);
         cJSON_AddStringToObject(json, "modelCode", kProductKey);
         cJSON_AddStringToObject(json, "name", "YGSoul ESP32S3");
-        cJSON_AddStringToObject(json, "status", netcfg_started_ ? "WIFI_CONFIGURING" : "READY");
+        cJSON_AddStringToObject(json, "status", netcfg_started ? "WIFI_CONFIGURING" : "READY");
+        cJSON_AddStringToObject(json, "provisioningStatus", provisioning_status.c_str());
+        cJSON_AddStringToObject(json, "provisioningErrorCode", provisioning_error_code.c_str());
         // Unified scan capability (A100_OPEN spec V1.0): all products use wifiScanVersion=1 + 0x16/0x17.
         cJSON_AddNumberToObject(json, "wifiScanVersion", 1);
         char* text = cJSON_PrintUnformatted(json);
@@ -357,11 +387,49 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
         } else {
             request.index = request.start ? 0 : -1;
         }
-        const auto response = wifi_scan_.Handle(request, !netcfg_started_ &&
+        bool netcfg_started = false;
+        {
+            std::lock_guard<std::mutex> lock(provisioning_mutex_);
+            netcfg_started = netcfg_started_;
+        }
+        const auto response = wifi_scan_.Handle(request, !netcfg_started &&
             static_cast<WifiBoard&>(Board::GetInstance()).IsInWifiConfigMode());
         cJSON_Delete(json);
         // Spec V1.0: reply CMD equals request CMD (0x16 or 0x17).
         Notify(command, response);
+        return;
+    }
+    if (command == ygsoul::ble::kCancelWifiConfig) {
+        if (!payload.empty()) {
+            SendStatus("FAILED", "INVALID_REQUEST");
+            return;
+        }
+        bool restore_candidate = false;
+        std::vector<SsidItem> previous_ssids;
+        {
+            std::lock_guard<std::mutex> operation_lock(wifi_operation_mutex_);
+            {
+                std::lock_guard<std::mutex> lock(provisioning_mutex_);
+                if (!started_) return;
+                pairing_receipt_.CancelPending();
+                attempt_deadline_us_ = 0;
+                if (wifi_connect_timeout_ != nullptr) esp_timer_stop(wifi_connect_timeout_);
+                restore_candidate = candidate_saved_;
+                previous_ssids = previous_ssids_;
+                candidate_saved_ = false;
+                previous_ssids_.clear();
+                merged_ssids_.clear();
+                netcfg_started_ = false;
+            }
+            WifiManager::GetInstance().StopStation();
+            if (restore_candidate) {
+                SsidManager::GetInstance().ReplaceSsidList(previous_ssids, false);
+            }
+        }
+        SendStatus("CANCELLED");
+        Application::GetInstance().Schedule([]() {
+            static_cast<WifiBoard&>(Board::GetInstance()).ExitWifiConfigMode();
+        });
         return;
     }
     if (command != ygsoul::ble::kWifiConfig) {
@@ -372,38 +440,80 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
         SendStatus("FAILED", "WIFI_SCAN_BUSY");
         return;
     }
-    std::string token;
-    std::string ssid;
-    std::string password;
-    if (!ParseWifiConfig(payload, token, ssid, password)) {
+    ygsoul::ble::WifiConfig config;
+    if (!ygsoul::ble::ParseWifiConfigPayload(payload, config)) {
         SendStatus("FAILED", "INVALID_WIFI");
         return;
     }
-    Settings(kPairingReceiptSettingsNamespace, true).EraseKey(kPairingReceiptKey);
-    pairing_receipt_.Begin(token, ssid);
-    netcfg_started_ = true;
-    if (!candidate_saved_) {
-        previous_ssids_ = SsidManager::GetInstance().GetSsidList();
-        candidate_saved_ = true;
+    // The snapshot is no longer needed once valid credentials are submitted.
+    // Free it before station startup/DHCP so dense networks do not retain RAM.
+    wifi_scan_.Reset();
+    const auto token = config.token;
+    const auto ssid = config.ssid;
+    const auto password = config.password;
+    {
+        std::lock_guard<std::mutex> lock(provisioning_mutex_);
+        if (!started_) return;
+        if (netcfg_started_) {
+            SendStatus("FAILED", "WIFI_CONNECT_BUSY");
+            return;
+        }
+        Settings(kWifiSettingsNamespace, true).EraseKey(kWifiPairingReceiptKey);
+        Settings(kLegacyPairingReceiptSettingsNamespace, true).EraseKey(kPairingReceiptKey);
+        if (!pairing_receipt_.Begin(token, ssid)) {
+            SendStatus("FAILED", "INVALID_WIFI");
+            return;
+        }
+        netcfg_started_ = true;
     }
-    SsidManager::GetInstance().AddSsid(ssid.c_str(), password.c_str());
-    ESP_LOGI(kTag, "WiFi credentials saved; starting station");
-    WifiManager::GetInstance().StopStation();
-    pairing_receipt_.StartWaiting();
-    if (wifi_connect_timeout_ == nullptr) {
-        const esp_timer_create_args_t timer_args = {
-            .callback = &YgSoulBleProvisioning::OnWifiConnectTimeout,
-            .arg = this,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "BleWifiTimeout",
-            .skip_unhandled_events = true,
-        };
-        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &wifi_connect_timeout_));
-    }
-    esp_timer_stop(wifi_connect_timeout_);
-    ESP_ERROR_CHECK(esp_timer_start_once(wifi_connect_timeout_, kWifiConnectTimeoutUs));
-    WifiManager::GetInstance().StartStation();
     SendStatus("CONNECTING");
+    // Match the proven A100 flow: acknowledge the BLE write synchronously,
+    // then run Wi-Fi connection outside the Bluetooth callback.
+    Application::GetInstance().Schedule([this, ssid, password]() {
+        esp_gatt_if_t gatts_if = ESP_GATT_IF_NONE;
+        uint16_t connection_id = 0;
+        {
+            std::lock_guard<std::mutex> lock(notify_mutex_);
+            if (connected_) {
+                gatts_if = gatts_if_;
+                connection_id = connection_id_;
+            }
+        }
+        if (gatts_if != ESP_GATT_IF_NONE) {
+            esp_ble_gatts_close(gatts_if, connection_id);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        std::lock_guard<std::mutex> operation_lock(wifi_operation_mutex_);
+        WifiManager::GetInstance().StopStation();
+        {
+            std::lock_guard<std::mutex> lock(provisioning_mutex_);
+            if (!started_ || !netcfg_started_) return;
+            auto& ssid_manager = SsidManager::GetInstance();
+            previous_ssids_ = ssid_manager.GetSsidList();
+            candidate_saved_ = true;
+            ssid_manager.AddSsid(ssid, password, false);
+            merged_ssids_ = ssid_manager.GetSsidList();
+            // During this attempt WifiStation must not fall back to a historical AP.
+            ssid_manager.ReplaceSsidList({{ssid, password}}, false);
+            pairing_receipt_.StartWaiting();
+            if (wifi_connect_timeout_ == nullptr) {
+                const esp_timer_create_args_t timer_args = {
+                    .callback = &YgSoulBleProvisioning::OnWifiConnectTimeout,
+                    .arg = this,
+                    .dispatch_method = ESP_TIMER_TASK,
+                    .name = "BleWifiTimeout",
+                    .skip_unhandled_events = true,
+                };
+                ESP_ERROR_CHECK(esp_timer_create(&timer_args, &wifi_connect_timeout_));
+            }
+            attempt_deadline_us_ = esp_timer_get_time() + kWifiConnectTimeoutUs;
+            esp_timer_stop(wifi_connect_timeout_);
+            ESP_ERROR_CHECK(esp_timer_start_once(wifi_connect_timeout_, kWifiConnectTimeoutUs));
+        }
+        ESP_LOGI(kTag, "WiFi credentials isolated; starting target station");
+        WifiManager::GetInstance().StartStation();
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    });
 }
 
 void YgSoulBleProvisioning::Notify(uint8_t command, const std::string& payload) {
@@ -426,6 +536,11 @@ void YgSoulBleProvisioning::Notify(uint8_t command, const std::string& payload) 
 }
 
 void YgSoulBleProvisioning::SendStatus(const char* status, const char* code) {
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        provisioning_status_ = status ? status : "";
+        provisioning_error_code_ = code ? code : "";
+    }
     ESP_LOGI(kTag, "Provisioning status: %s%s", status, code ? " (with code)" : "");
     cJSON* json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "status", status);
@@ -437,47 +552,77 @@ void YgSoulBleProvisioning::SendStatus(const char* status, const char* code) {
 }
 
 void YgSoulBleProvisioning::OnNetworkEvent(NetworkEvent event, const std::string& data) {
-    if (event == NetworkEvent::Connected) {
+    if (event != NetworkEvent::Connected) return;
+    {
+        std::lock_guard<std::mutex> lock(provisioning_mutex_);
         const auto result = pairing_receipt_.Complete(data);
         if (result == ygsoul::ble::PairingReceipt::Result::Ignored) return;
         if (result == ygsoul::ble::PairingReceipt::Result::Mismatch) {
-            FailProvisioning("WIFI_SSID_MISMATCH");
+            ESP_LOGW(kTag, "Ignoring stale WiFi connected event for SSID %s", data.c_str());
             return;
         }
+        attempt_deadline_us_ = 0;
         if (wifi_connect_timeout_ != nullptr) esp_timer_stop(wifi_connect_timeout_);
         const auto pairing_session_id = pairing_receipt_.SessionId();
-        if (!pairing_session_id.empty()) {
-            Settings(kPairingReceiptSettingsNamespace, true)
-                .SetString(kPairingReceiptKey, pairing_session_id);
+        if (candidate_saved_) {
+            SsidManager::GetInstance().ReplaceSsidListAndPairingSession(
+                merged_ssids_, pairing_session_id);
         }
         candidate_saved_ = false;
         previous_ssids_.clear();
+        merged_ssids_.clear();
+        netcfg_started_ = false;
         SendStatus("SUCCEEDED");
-        EnsureAdvertising();
-        Application::GetInstance().Schedule([]() {
-            static_cast<WifiBoard&>(Board::GetInstance()).ExitWifiConfigMode();
-        });
     }
+    EnsureAdvertising();
+    Application::GetInstance().Schedule([]() {
+        static_cast<WifiBoard&>(Board::GetInstance()).ExitWifiConfigMode();
+    });
 }
 
 void YgSoulBleProvisioning::OnWifiConnectTimeout(void* arg) {
     auto* service = static_cast<YgSoulBleProvisioning*>(arg);
-    if (service->pairing_receipt_.CancelPending()) {
-        service->FailProvisioning("WIFI_CONNECT_TIMEOUT");
+    int64_t expired_deadline = 0;
+    {
+        std::lock_guard<std::mutex> lock(service->provisioning_mutex_);
+        if (!service->netcfg_started_ || service->attempt_deadline_us_ == 0) return;
+        const auto remaining = service->attempt_deadline_us_ - esp_timer_get_time();
+        if (remaining > 0) {
+            // A queued callback can belong to the previous attempt. Re-arm it for
+            // the current deadline instead of cancelling the new pairing session.
+            esp_timer_stop(service->wifi_connect_timeout_);
+            if (esp_timer_start_once(service->wifi_connect_timeout_, remaining) == ESP_OK) return;
+        }
+        expired_deadline = service->attempt_deadline_us_;
     }
+    service->FailProvisioning("WIFI_CONNECT_TIMEOUT", expired_deadline);
 }
 
-void YgSoulBleProvisioning::FailProvisioning(const char* code) {
-    pairing_receipt_.CancelPending();
-    if (wifi_connect_timeout_ != nullptr) esp_timer_stop(wifi_connect_timeout_);
-    WifiManager::GetInstance().StopStation();
-    if (candidate_saved_) {
-        SsidManager::GetInstance().ReplaceSsidList(previous_ssids_);
+void YgSoulBleProvisioning::FailProvisioning(const char* code, int64_t expected_deadline_us) {
+    bool restore_candidate = false;
+    std::vector<SsidItem> previous_ssids;
+    {
+        std::lock_guard<std::mutex> operation_lock(wifi_operation_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(provisioning_mutex_);
+            if ((!netcfg_started_ && !candidate_saved_) ||
+                attempt_deadline_us_ != expected_deadline_us) return;
+            pairing_receipt_.CancelPending();
+            attempt_deadline_us_ = 0;
+            if (wifi_connect_timeout_ != nullptr) esp_timer_stop(wifi_connect_timeout_);
+            restore_candidate = candidate_saved_;
+            previous_ssids = previous_ssids_;
+            candidate_saved_ = false;
+            previous_ssids_.clear();
+            merged_ssids_.clear();
+            netcfg_started_ = false;
+        }
+        WifiManager::GetInstance().StopStation();
+        if (restore_candidate) {
+            SsidManager::GetInstance().ReplaceSsidList(previous_ssids, false);
+        }
     }
-    candidate_saved_ = false;
-    previous_ssids_.clear();
-    netcfg_started_ = false;
     SendStatus("FAILED", code);
-    // Keep BLE advertising so the phone can retry without a power cycle.
+    // Keep BLE provisioning available for an immediate retry.
     EnsureAdvertising();
 }

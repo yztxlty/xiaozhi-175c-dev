@@ -35,8 +35,8 @@ def test_role_animation_commands_report_exact_manifest_and_query_same_snapshot()
 def test_only_real_listening_and_speaking_events_are_advertised_and_routed():
     board = (ROOT / "main/boards/common/wifi_board.cc").read_text()
     application = (ROOT / "main/application.cc").read_text()
-    assert 'cJSON_AddStringToArray(actions, "listening")' in board
-    assert 'cJSON_AddStringToArray(actions, "speaking")' in board
+    assert 'cJSON_AddItemToArray(actions, cJSON_CreateString("listening"))' in board
+    assert 'cJSON_AddItemToArray(actions, cJSON_CreateString("speaking"))' in board
     assert 'cJSON_AddNumberToObject(capability, "maxActions", 2)' in board
     assert 'RoleAnimationStore::GetInstance().Show("listening")' in application
     assert 'RoleAnimationStore::GetInstance().Show("speaking")' in application

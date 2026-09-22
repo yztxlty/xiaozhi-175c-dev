@@ -153,11 +153,19 @@ main/boards/waveshare/esp32-s3-touch-amoled-1.75/
 main/                  # 固件主程序、协议、音频和板卡实现
 main/boards/            # 各型号开发板适配代码
 main/assets/            # 音频、语言和界面资源
+components/78__esp-ml307/       # 固定版本的网络与 TLS 组件
+components/78__esp-wifi-connect/ # 固定版本的 Wi-Fi 配网组件
 managed_components/     # ESP-IDF Component Manager 下载的依赖组件
 partitions/             # 分区表配置
 scripts/                # 构建、资源处理和检查脚本
 docs/                   # 协议、开发和设计文档
 ~~~
+
+### 固定依赖
+
+`components/78__esp-ml307` 和 `components/78__esp-wifi-connect` 包含本项目已验证的本地修改，完整目录随 Git 版本化，并通过 `main/idf_component.yml` 的 `override_path` 参与构建。前者同时承载 TLS 连接超时、直连地址与原域名证书校验、接收线程内存和 WebSocket 生命周期等改动；恢复或审查时必须以 Git 中的完整目录为唯一事实源。
+
+`scripts/补丁/TLS接收线程外部内存.patch` 仅保留为历史说明，不再是可应用的恢复补丁；其他 `components` 子目录仍属于本地依赖缓存，不进入 Git。
 
 ## 相关文档
 
@@ -189,7 +197,7 @@ git status --short
 仓库不会提交以下本地生成内容：
 
 - build/、dist/ 等构建产物。
-- components/、未修改的 managed_components/ 等依赖缓存。
+- 除 `components/78__esp-ml307`、`components/78__esp-wifi-connect` 外的 components/，以及 managed_components/ 等依赖缓存。
 - sdkconfig、dependencies.lock 等本地生成配置。
 - .env、密钥、令牌、日志和编辑器配置。
 - .DS_Store、Python 缓存和临时文件。

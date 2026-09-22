@@ -241,7 +241,7 @@ def test_pairing_reboots_before_ble_when_conversation_memory_is_active():
     assert "EnterWifiConfigMode();" in voice
 
 
-def test_pairing_completion_returns_to_standby_without_rebooting():
+def test_pairing_completion_stays_connecting_until_activation_finishes():
     wifi = _read("main/boards/common/wifi_board.cc")
     ble = _read("main/boards/common/ygsoul_ble_provisioning.cc")
     exit_mode = _slice(wifi, "void WifiBoard::ExitWifiConfigMode", "bool WifiBoard::IsInWifiConfigMode")
@@ -250,7 +250,13 @@ def test_pairing_completion_returns_to_standby_without_rebooting():
     assert "ExitWifiConfigMode();" in connected
     assert "Settings websocket_settings" not in exit_mode
     assert "Application::GetInstance().Reboot();" not in exit_mode
-    assert "Application::GetInstance().EnterStandby();" in exit_mode
+    online = exit_mode[exit_mode.index("if (WifiManager::GetInstance().IsConnected())"):]
+    connected_branch, disconnected_branch = online.split("} else {", 1)
+    assert "SetDeviceState(kDeviceStateConnecting)" in connected_branch
+    assert "EnterStandby" not in connected_branch
+    assert connected_branch.index("SetDeviceState(kDeviceStateConnecting)") < connected_branch.index("network_event_callback_")
+    assert "EnterStandby" in disconnected_branch
+    assert disconnected_branch.index("EnterStandby") < disconnected_branch.index("TryWifiConnect")
 
 
 def test_pairing_starts_ble_after_conversation_audio_is_released():
@@ -274,6 +280,27 @@ def test_pairing_does_not_restart_an_active_ble_advertisement():
     assert "advertising_" in header
     assert "advertising_" in ensure
     assert "ESP_GAP_BLE_ADV_START_COMPLETE_EVT" in ble
+
+
+def test_pairing_ui_claims_advertising_only_after_gap_success():
+    app = _read("main/application.cc")
+    ble = _read("main/boards/common/ygsoul_ble_provisioning.cc")
+    state = _slice(app, "case kDeviceStateWifiConfiguring:", "default:")
+    gap = _slice(ble, "void YgSoulBleProvisioning::GapEvent", "void YgSoulBleProvisioning::HandleWrite")
+
+    assert "正在启动 BLE 配网" in state
+    assert "BLE 配网广播已开启" not in state
+    assert "BLE 配网广播已开启" in gap
+    assert "BLE 配网启动失败，正在重试" in gap
+
+
+def test_ble_initialization_failure_rearms_pairing_boot_and_reboots():
+    wifi = _read("main/boards/common/wifi_board.cc")
+    start = _slice(wifi, "void WifiBoard::StartWifiConfigMode()", "void WifiBoard::EnterWifiConfigMode()")
+    failure = start.split("YgSoulBleProvisioning::GetInstance().Start() != ESP_OK", 1)[1]
+
+    assert "SetBool(kPairingRebootPendingKey, true)" in failure
+    assert "Application::GetInstance().Reboot();" in failure
 
 
 if __name__ == "__main__":

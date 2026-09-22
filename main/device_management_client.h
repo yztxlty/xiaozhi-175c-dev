@@ -1,6 +1,7 @@
 #ifndef DEVICE_MANAGEMENT_CLIENT_H
 #define DEVICE_MANAGEMENT_CLIENT_H
 
+#include <atomic>
 #include <memory>
 #include <functional>
 #include <mutex>
@@ -13,7 +14,7 @@ public:
     DeviceManagementClient();
     ~DeviceManagementClient();
 
-    void Start();
+    bool Start();
     void Stop();
     bool IsConnected() const;
     bool Send(const std::string& message);
@@ -31,8 +32,8 @@ private:
     std::string token_;
     int heartbeat_seconds_ = 60;
     bool connected_ = false;
-    bool started_ = false;
-    bool running_ = false;
+    std::atomic_bool started_{false};
+    std::atomic_bool running_{false};
 
     static void Run(void* arg);
     static std::string NormalizeWebSocketUrl(std::string url);

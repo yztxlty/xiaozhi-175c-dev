@@ -71,3 +71,12 @@ int main() {
     assert built.returncode == 0, built.stderr
     result = subprocess.run([str(executable)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_settings_erase_operations_are_committed():
+    settings = (ROOT / 'main/settings.cc').read_text()
+    erase_key = settings.split('void Settings::EraseKey', 1)[1].split('void Settings::EraseAll', 1)[0]
+    erase_all = settings.split('void Settings::EraseAll', 1)[1]
+
+    assert 'dirty_ = true;' in erase_key
+    assert 'dirty_ = true;' in erase_all

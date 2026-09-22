@@ -168,8 +168,10 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
 #endif
             // A device can receive an IP and then lose Wi-Fi. Restart the
             // bounded recovery timer so it cannot remain in silent retries.
-            esp_timer_stop(connect_timer_);
-            esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+            if (!in_config_mode_) {
+                esp_timer_stop(connect_timer_);
+                esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+            }
             break;
         case NetworkEvent::WifiConfigModeEnter:
             ESP_LOGI(TAG, "WiFi config mode entered");
@@ -204,6 +206,7 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
 }
 
 void WifiBoard::StartWifiConfigMode() {
+    esp_timer_stop(connect_timer_);
     in_config_mode_ = true;
     if (!Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring)) {
         in_config_mode_ = false;
@@ -219,6 +222,12 @@ void WifiBoard::StartWifiConfigMode() {
         if (YgSoulBleProvisioning::GetInstance().Start() != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start YGSoul BLE provisioning");
             in_config_mode_ = false;
+            {
+                Settings pairing(kPairingSettingsNamespace, true);
+                pairing.SetBool(kPairingRebootPendingKey, true);
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
+            Application::GetInstance().Reboot();
         }
     });
 #elif CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
@@ -315,12 +324,13 @@ void WifiBoard::ExitWifiConfigMode() {
     YgSoulBleProvisioning::GetInstance().Stop();
 #endif
     in_config_mode_ = false;
-    Application::GetInstance().EnterStandby();
     // 成功回执可能晚于联网事件处理。退出配网后重新通知应用层，
     // 保证先释放 BLE，再初始化联网协议；未联网的显式退出恢复旧 Wi-Fi。
     if (WifiManager::GetInstance().IsConnected()) {
+        Application::GetInstance().SetDeviceState(kDeviceStateConnecting);
         if (network_event_callback_) network_event_callback_(NetworkEvent::Connected, "");
     } else {
+        Application::GetInstance().EnterStandby();
         TryWifiConnect();
     }
 }
@@ -419,10 +429,10 @@ std::string WifiBoard::GetDeviceStatusJson() {
     auto capability = cJSON_AddObjectToObject(root, "roleAnimation");
     cJSON_AddNumberToObject(capability, "protocolVersion", 1);
     auto actions = cJSON_AddArrayToObject(capability, "supportedActions");
-    cJSON_AddStringToArray(actions, "listening");
-    cJSON_AddStringToArray(actions, "speaking");
+    cJSON_AddItemToArray(actions, cJSON_CreateString("listening"));
+    cJSON_AddItemToArray(actions, cJSON_CreateString("speaking"));
     auto formats = cJSON_AddArrayToObject(capability, "formats");
-    cJSON_AddStringToArray(formats, "eaf");
+    cJSON_AddItemToArray(formats, cJSON_CreateString("eaf"));
     cJSON_AddNumberToObject(capability, "width", 466);
     cJSON_AddNumberToObject(capability, "height", 466);
     cJSON_AddNumberToObject(capability, "maxFps", 10);

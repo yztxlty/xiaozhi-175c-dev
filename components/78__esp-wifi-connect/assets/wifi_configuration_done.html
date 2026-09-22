@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <title>幽光 Soul · 连接成功</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        body {
+            min-height: 100vh;
+            margin: 0;
+            color: #f4f5ff;
+            background:
+                radial-gradient(circle at 50% 18%, rgba(115, 134, 220, .34), transparent 35%),
+                linear-gradient(145deg, #0b1122, #10172a 55%, #17233a);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+        }
+        .container {
+            display: flex;
+            min-height: 100vh;
+            align-items: center;
+            justify-content: center;
+            padding: 28px 18px;
+        }
+        .panel {
+            width: min(520px, 100%);
+            padding: 32px 24px 26px;
+            text-align: center;
+            border: 1px solid rgba(179, 201, 239, .34);
+            border-radius: 26px;
+            background: rgba(37, 51, 77, .76);
+            box-shadow: 0 20px 60px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.1);
+            backdrop-filter: blur(22px);
+        }
+        .brand-logo {
+            width: 124px;
+            height: 124px;
+            object-fit: contain;
+            filter: drop-shadow(0 0 24px rgba(142, 124, 244, .45));
+            mix-blend-mode: screen;
+        }
+        .brand { margin: 10px 0 30px; color: rgba(244,245,255,.72); font-size: 12px; letter-spacing: .34em; }
+        .checkmark { width: 92px; height: 92px; margin: 0 auto 20px; }
+        .checkmark__circle { fill: rgba(138,216,232,.12); stroke: #8ad8e8; stroke-width: 1.6; }
+        .checkmark__check { stroke: #f4f5ff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+        h1 { margin: 0 0 10px; font-size: 26px; font-weight: 650; }
+        p { margin: 0; color: #b8c4dc; font-size: 15px; line-height: 1.7; }
+        .hint { margin-top: 24px; padding-top: 18px; border-top: 1px solid rgba(179,201,239,.18); font-size: 13px; }
+        @media (max-width: 420px) { .panel { padding: 26px 18px 22px; } h1 { font-size: 23px; } }
+        @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+    </style>
+</head>
+<body>
+    <main class="container">
+        <section class="panel" aria-live="polite">
+            <img class="brand-logo" src="data:image/jpeg;base64,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" alt="幽光 Soul">
+            <div class="brand">幽光 SOUL</div>
+            <svg class="checkmark" viewBox="0 0 52 52" aria-hidden="true">
+                <circle class="checkmark__circle" cx="26" cy="26" r="25" />
+                <path class="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8" />
+            </svg>
+            <h1>连接成功</h1>
+            <p>幽光 Soul 已准备好陪伴你</p>
+            <p class="hint">设备正在退出配网模式，请稍候返回使用。</p>
+        </section>
+    </main>
+    <script>
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                fetch('/exit', { method: 'POST' })
+                    .then(function(response) {
+                        if (!response.ok) console.error('Failed to send exit config mode request');
+                    })
+                    .catch(function(error) { console.error('Error:', error); });
+            }, 1000);
+        });
+    </script>
+</body>
+</html>

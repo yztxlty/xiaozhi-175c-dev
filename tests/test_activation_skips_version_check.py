@@ -60,6 +60,51 @@ def test_activation_retries_connection_config_and_never_reports_false_success():
     assert task.index("InitializeProtocol();") < task.index("MAIN_EVENT_ACTIVATION_DONE")
 
 
+def test_activation_keeps_wifi_fast_until_management_receipt_channel_is_online():
+    task = _slice(_source(), "void Application::ActivationTask()", "void Application::CheckAssetsVersion()")
+
+    performance = task.index("SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE)")
+    management = task.index("InitializeManagementClient();")
+    receipt_sent = task.index("ReportPairingReceipt()")
+    balanced = task.index("SetPowerSaveLevel(PowerSaveLevel::BALANCED)")
+    ydp = task.index("YdpClient::GetInstance()")
+    voice = task.index("InitializeProtocol();")
+    activation_done = task.index("MAIN_EVENT_ACTIVATION_DONE")
+    assert performance < management < receipt_sent < balanced < ydp < voice < activation_done
+
+
+def test_management_start_failure_is_recoverable_and_never_false_succeeds():
+    source = _source()
+    task = _slice(source, "void Application::ActivationTask()", "void Application::CheckAssetsVersion()")
+    init = _slice(source, "void Application::InitializeProtocol()", "void Application::HandleCustomMessage")
+    management = (ROOT / "main/device_management_client.cc").read_text()
+    header = (ROOT / "main/device_management_client.h").read_text()
+
+    assert "bool Start();" in header
+    assert "if (!management_client_->Start())" in init
+    assert "management_client_.reset();" in init
+    assert "while (!ReportPairingReceipt())" in task
+    recovery = task[task.index("while (management_client_ == nullptr"):task.index("while (!ReportPairingReceipt())")]
+    assert "ota_->CheckVersion()" in recovery
+    assert "InitializeManagementClient()" in recovery
+    assert "xTaskCreateWithCaps" in management
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in management
+    assert "vTaskDeleteWithCaps" in management
+    assert "started_ = false" in management
+    assert "running_ = false" in management
+
+
+def test_pairing_receipt_never_falls_back_to_the_voice_channel():
+    source = _source()
+    receipt = _slice(source, "bool Application::ReportPairingReceipt()", "void Application::ReportDeviceUplink")
+    uplink = _slice(source, "void Application::ReportDeviceUplink", "void Application::ReportDeviceTelemetry")
+
+    assert "pairingSessionId" in receipt
+    assert "management_client_->Send" in receipt
+    assert "protocol_->SendDeviceMessage" not in receipt
+    assert "pairingSessionId" not in uplink
+
+
 def test_app_ota_command_checks_the_just_created_task_and_starts_upgrade():
     source = _source()
     command = _slice(source, "void Application::HandleCustomMessage", "void Application::ReportDeviceUplink")

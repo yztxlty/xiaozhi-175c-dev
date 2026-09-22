@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -29,7 +31,7 @@ private:
     void HandleFrame(uint8_t command, const std::string& payload);
     void Notify(uint8_t command, const std::string& payload);
     void SendStatus(const char* status, const char* code = nullptr);
-    void FailProvisioning(const char* code);
+    void FailProvisioning(const char* code, int64_t expected_deadline_us);
     static void OnWifiConnectTimeout(void* arg);
 
     bool started_ = false;
@@ -41,10 +43,17 @@ private:
     uint16_t notify_handle_ = 0;
     ygsoul::ble::PairingReceipt pairing_receipt_;
     YgSoulWifiScan wifi_scan_;
+    std::mutex provisioning_mutex_;
+    std::mutex wifi_operation_mutex_;
     std::mutex notify_mutex_;
+    std::mutex status_mutex_;
+    std::string provisioning_status_ = "READY";
+    std::string provisioning_error_code_;
     bool notify_enabled_ = false;
     bool candidate_saved_ = false;
     std::vector<SsidItem> previous_ssids_;
+    std::vector<SsidItem> merged_ssids_;
+    int64_t attempt_deadline_us_ = 0;
     esp_timer_handle_t wifi_connect_timeout_ = nullptr;
     ygsoul::ble::BleFrameParser* parser_ = nullptr;
 };

@@ -39,6 +39,22 @@ int main() {
     parser.Feed(frame.data(), frame.size(), frames);
     assert(frames.empty());
     assert(EncodeBleFrame(kWifiConfig, std::string(239, 'x')).empty());
+
+    const std::string id = "12345678-1234-4234-8234-123456789abc";
+    auto field = [](const std::string& value) {
+        return std::string(1, static_cast<char>(value.size())) + value;
+    };
+    WifiConfig config;
+    const auto valid = field(id + ".secret") + field("YGSoul") + field("password");
+    assert(ParseWifiConfigPayload(valid, config));
+    assert(config.token == id + ".secret");
+    assert(config.ssid == "YGSoul" && config.password == "password");
+    assert(!ParseWifiConfigPayload(field("YGSoul") + field("password"), config));
+    assert(!ParseWifiConfigPayload(field("legacy-token") + field("YGSoul") + field("password"), config));
+    assert(!ParseWifiConfigPayload(field(id + ".") + field("YGSoul") + field("password"), config));
+    assert(!ParseWifiConfigPayload(valid + field("extra"), config));
+    assert(!ParseWifiConfigPayload(field(id + ".secret") + field(std::string(33, 's')) + field("password"), config));
+    assert(!ParseWifiConfigPayload(field(id + ".secret") + field("YGSoul") + field(std::string(65, 'p')), config));
 }
 '''
     with tempfile.TemporaryDirectory() as directory:
@@ -76,19 +92,59 @@ def test_ygsoul_ble_provisioning_rolls_back_failed_wifi_candidates():
     ssid_manager = (ROOT / "components/78__esp-wifi-connect/include/ssid_manager.h").read_text()
     assert "ReplaceSsidList" in ssid_manager
     assert "previous_ssids_" in source
-    assert "ReplaceSsidList(previous_ssids_)" in source
+    assert "ReplaceSsidList(previous_ssids, false)" in source
+    assert "merged_ssids_" in source
+    assert "ReplaceSsidListAndPairingSession(" in source
+    assert "merged_ssids_, pairing_session_id)" in source
+    assert "ReplaceSsidList({{ssid, password}}, false)" in source
     assert "WifiManager::GetInstance().StopStation()" in source
     assert "void YgSoulBleProvisioning::FailProvisioning" in source
-    assert "FailProvisioning(\"WIFI_CONNECT_TIMEOUT\")" in source
+    assert "FailProvisioning(\"WIFI_CONNECT_TIMEOUT\", expired_deadline)" in source
     assert "netcfg_started_ = false" in source
     assert "// Keep BLE provisioning available for an immediate retry." in source
 
 
-def test_wifi_disconnect_restarts_bounded_recovery_timer():
+def test_explicit_ble_cancel_restores_history_and_exits_pairing_mode():
+    protocol = (ROOT / "main/boards/common/ygsoul_ble_protocol.h").read_text()
+    source = (ROOT / "main/boards/common/ygsoul_ble_provisioning.cc").read_text()
+    handler = source.split("void YgSoulBleProvisioning::HandleFrame", 1)[1].split(
+        "void YgSoulBleProvisioning::Notify", 1
+    )[0]
+
+    assert "kCancelWifiConfig = 0x07" in protocol
+    assert "command == ygsoul::ble::kCancelWifiConfig" in handler
+    assert 'SendStatus("CANCELLED")' in handler
+    assert "pairing_receipt_.CancelPending()" in handler
+    assert "ReplaceSsidList(previous_ssids, false)" in handler
+    assert "ExitWifiConfigMode()" in handler
+
+
+def test_pairing_timeout_uses_current_attempt_deadline():
+    source = (ROOT / "main/boards/common/ygsoul_ble_provisioning.cc").read_text()
+    header = (ROOT / "main/boards/common/ygsoul_ble_provisioning.h").read_text()
+    callback = source.split("void YgSoulBleProvisioning::OnWifiConnectTimeout", 1)[1].split(
+        "void YgSoulBleProvisioning::FailProvisioning", 1
+    )[0]
+    assert "attempt_deadline_us_" in header
+    assert "esp_timer_get_time()" in callback
+    assert "remaining" in callback
+    assert "esp_timer_start_once" in callback
+    assert callback.index("remaining > 0") < callback.index("FailProvisioning")
+
+
+def test_wifi_disconnect_does_not_restart_recovery_timer_during_pairing():
     source = read("main/boards/common/wifi_board.cc")
     disconnected = source[source.index("case NetworkEvent::Disconnected:"):source.index("case NetworkEvent::WifiConfigModeEnter:")]
-    assert "esp_timer_stop(connect_timer_)" in disconnected
-    assert "esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)" in disconnected
+    assert "if (!in_config_mode_)" in disconnected
+    guarded = disconnected[disconnected.index("if (!in_config_mode_)"):]
+    assert "esp_timer_stop(connect_timer_)" in guarded
+    assert "esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)" in guarded
+
+
+def test_starting_pairing_cancels_any_previous_wifi_recovery_timer():
+    source = read("main/boards/common/wifi_board.cc")
+    start = source[source.index("void WifiBoard::StartWifiConfigMode()"):source.index("void WifiBoard::EnterWifiConfigMode()")]
+    assert start.index("esp_timer_stop(connect_timer_)") < start.index("in_config_mode_ = true")
 
 
 if __name__ == "__main__":

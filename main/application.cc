@@ -134,7 +134,7 @@ void Application::Initialize() {
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
         auto display = Board::GetInstance().GetDisplay();
-        
+
         switch (event) {
             case NetworkEvent::Scanning:
                 display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
@@ -199,7 +199,7 @@ void Application::Run() {
     // Set the priority of the main task to 10
     vTaskPrioritySet(nullptr, 10);
 
-    const EventBits_t ALL_EVENTS = 
+    const EventBits_t ALL_EVENTS =
         MAIN_EVENT_SCHEDULE |
         MAIN_EVENT_SEND_AUDIO |
         MAIN_EVENT_WAKE_WORD_DETECTED |
@@ -283,10 +283,11 @@ void Application::Run() {
             Board::GetInstance().RefreshDynamicData();
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
-        
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
+                if (management_client_ != nullptr) management_client_->Start();
             }
 #ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
             if (GetDeviceState() == kDeviceStateWifiConfiguring) {
@@ -321,6 +322,8 @@ void Application::HandleNetworkConnectedEvent() {
     StartNetworkTimeSync();
 
     if (management_client_ != nullptr) {
+        management_client_->Start();
+        ReportPairingReceipt();
         ESP_LOGI(TAG, "Reporting online immediately after Wi-Fi join");
         ReportDeviceUplink("attributes");
         ReportDeviceUplink("telemetry");
@@ -384,6 +387,8 @@ void Application::HandleActivationDoneEvent() {
 }
 
 void Application::ActivationTask() {
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
     // Create OTA object to fetch websocket/management endpoints.
     // Pairing already finished; do not check firmware/assets versions,
     // auto-upgrade, or wait for an activation code.
@@ -398,7 +403,25 @@ void Application::ActivationTask() {
     ota_->MarkCurrentVersionValid();
     ota_->ConfirmPendingUpgrade();
 
-    // YGSoul Device Auth v2: prove identity before opening chat/management channels.
+    // The pairing gate uses only the lightweight management channel. Do not
+    // initialize the voice protocol before the App receives this session receipt.
+    InitializeManagementClient();
+    while (management_client_ == nullptr || !management_client_->IsConnected()) {
+        if (management_client_ == nullptr) {
+            ESP_LOGW(TAG, "Management config unavailable, refresh in 1 second");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            if (ota_->CheckVersion() == ESP_OK) InitializeManagementClient();
+            continue;
+        }
+        management_client_->Start();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    while (!ReportPairingReceipt()) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::BALANCED);
+
+    // YGSoul Device Auth v2: prove identity before opening the chat channel.
     {
         auto& ydp = ygsoul::ydp::YdpClient::GetInstance();
         ydp.SetYdpEndpoint(CONFIG_YDP_ACTIVATION_BASE_URL);
@@ -433,7 +456,6 @@ void Application::ActivationTask() {
         }
     }
 
-    // Initialize the protocol
     InitializeProtocol();
 
     // Signal completion to main loop
@@ -455,7 +477,7 @@ void Application::CheckAssetsVersion() {
         ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
         return;
     }
-    
+
     Settings settings("assets", true);
     // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
@@ -466,7 +488,7 @@ void Application::CheckAssetsVersion() {
         char message[256];
         snprintf(message, sizeof(message), Lang::Strings::FOUND_NEW_ASSETS, download_url.c_str());
         Alert(Lang::Strings::LOADING_ASSETS, message, "cloud_arrow_down", Lang::Sounds::OGG_UPGRADE);
-        
+
         // Wait for the audio service to be idle for 3 seconds
         vTaskDelay(pdMS_TO_TICKS(3000));
         SetDeviceState(kDeviceStateUpgrading);
@@ -603,13 +625,13 @@ void Application::InitializeProtocol() {
         last_error_message_ = message;
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
-    
+
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (voice_session_active_.load() && GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
-    
+
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
@@ -617,7 +639,7 @@ void Application::InitializeProtocol() {
                 protocol_->server_sample_rate(), codec->output_sample_rate());
         }
     });
-    
+
     protocol_->OnAudioChannelClosed([this, &board]() {
         if (refreshing_role_voice_.exchange(false)) {
             ESP_LOGI(TAG, "Ignore expected audio close while refreshing role session");
@@ -632,7 +654,7 @@ void Application::InitializeProtocol() {
             }
         });
     });
-    
+
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
@@ -749,14 +771,19 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
     });
-    
+
     protocol_->Start();
     }
 
+    InitializeManagementClient();
+}
+
+void Application::InitializeManagementClient() {
     if (management_client_ == nullptr) {
     management_client_ = std::make_unique<DeviceManagementClient>();
     management_client_->OnConnected([this]() {
         Schedule([this]() {
+            ReportPairingReceipt();
             ReportDeviceUplink("attributes");
             ReportDeviceUplink("telemetry");
             ReportDeviceUplink("event", "device.connected");
@@ -775,7 +802,9 @@ void Application::InitializeProtocol() {
     management_client_->OnHeartbeat([this]() {
         Schedule([this]() { ReportDeviceUplink("telemetry"); });
     });
-    management_client_->Start();
+    if (!management_client_->Start()) {
+        management_client_.reset();
+    }
     }
 }
 
@@ -1077,18 +1106,22 @@ void Application::HandleCustomMessage(const cJSON* root) {
         });
     }
     if (succeeded && strcmp(command->valuestring, "unbind") == 0) {
-        ESP_LOGI(TAG, "unbind ACK sent, clearing Wi-Fi and entering provisioning");
+        ESP_LOGI(TAG, "unbind ACK sent, clearing Wi-Fi and rebooting into provisioning");
         ReportDeviceUplink("event", "device.offline");
         Schedule([]() {
             vTaskDelay(pdMS_TO_TICKS(800));
-            // CRITICAL-RUNTIME-CONTRACT: do not reboot here. A normal physical reboot
-            // keeps saved Wi-Fi; only this explicit App-unbind path removes it.
+            // BLE cannot be re-created reliably after the active audio/network stack
+            // has fragmented internal SRAM. Persist the pairing boot flag after the
+            // explicit unbind wipe, then restart into BLE before those stacks exist.
             SsidManager::GetInstance().Clear();
-            Settings wifi_settings("wifi", true);
-            wifi_settings.EraseAll();
+            {
+                Settings wifi_settings("wifi", true);
+                wifi_settings.EraseAll();
+                wifi_settings.SetBool("pair_pending", true);
+            }
             RoleVisualStore::GetInstance().Clear();
             WifiManager::GetInstance().StopStation();
-            static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
+            Application::GetInstance().Reboot();
         });
     }
     if (succeeded && strcmp(command->valuestring, "factoryReset") == 0) {
@@ -1133,6 +1166,32 @@ void Application::RefreshVoiceSessionAfterRoleChange() {
     ESP_LOGI(TAG, "Role voice session refreshed");
 }
 
+bool Application::ReportPairingReceipt() {
+#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
+    const auto pairing_session_id = YgSoulBleProvisioning::GetInstance().GetPairingSessionId();
+    if (pairing_session_id.empty()) return true;
+    if (management_client_ == nullptr || !management_client_->IsConnected()) return false;
+
+    auto response = cJSON_CreateObject();
+    auto payload = cJSON_AddObjectToObject(response, "payload");
+    auto reported = cJSON_AddObjectToObject(payload, "reported");
+    cJSON_AddStringToObject(response, "type", "custom");
+    const auto request_id = std::string("pairing-") + std::to_string(esp_timer_get_time());
+    cJSON_AddStringToObject(payload, "requestId", request_id.c_str());
+    cJSON_AddStringToObject(payload, "reportType", "event");
+    cJSON_AddStringToObject(payload, "eventType", "device.connected");
+    cJSON_AddStringToObject(payload, "status", "SUCCEEDED");
+    cJSON_AddStringToObject(reported, "pairingSessionId", pairing_session_id.c_str());
+    auto text = cJSON_PrintUnformatted(response);
+    const bool sent = text != nullptr && management_client_->Send(text);
+    cJSON_free(text);
+    cJSON_Delete(response);
+    return sent;
+#else
+    return true;
+#endif
+}
+
 void Application::ReportDeviceUplink(const char* report_type, const char* event_type,
                                      const char* gallery_item_id) {
     if (protocol_ == nullptr || report_type == nullptr) {
@@ -1150,11 +1209,6 @@ void Application::ReportDeviceUplink(const char* report_type, const char* event_
     }
     auto reported = cJSON_Parse(Board::GetInstance().GetDeviceStatusJson().c_str());
     if (reported != nullptr) {
-        std::string pairing_session_id;
-#ifdef CONFIG_USE_YGSOUL_BLE_WIFI_PROVISIONING
-        pairing_session_id = YgSoulBleProvisioning::GetInstance().GetPairingSessionId();
-#endif
-        cJSON_AddStringToObject(reported, "pairingSessionId", pairing_session_id.c_str());
         if (gallery_item_id != nullptr && gallery_item_id[0] != '\0') {
             cJSON_AddStringToObject(reported, "deletedGalleryItemId", gallery_item_id);
             auto& gallery = GalleryStore::GetInstance();
@@ -1199,7 +1253,7 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
     };
     static const std::array<digit_sound, 10> digit_sounds{{
         digit_sound{'0', Lang::Sounds::OGG_0},
-        digit_sound{'1', Lang::Sounds::OGG_1}, 
+        digit_sound{'1', Lang::Sounds::OGG_1},
         digit_sound{'2', Lang::Sounds::OGG_2},
         digit_sound{'3', Lang::Sounds::OGG_3},
         digit_sound{'4', Lang::Sounds::OGG_4},
@@ -1273,7 +1327,7 @@ void Application::HandleToggleChatEvent() {
         return;
     }
 #endif
-    
+
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -1323,7 +1377,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 void Application::HandleStartListeningEvent() {
     if (music_player_visible_.load()) return;
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -1337,7 +1391,7 @@ void Application::HandleStartListeningEvent() {
         ESP_LOGE(TAG, "Protocol not initialized");
         return;
     }
-    
+
     if (state == kDeviceStateIdle) {
         voice_session_active_ = true;
         if (!protocol_->IsAudioChannelOpened()) {
@@ -1357,7 +1411,7 @@ void Application::HandleStartListeningEvent() {
 
 void Application::HandleStopListeningEvent() {
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateAudioTesting) {
         audio_service_.EnableAudioTesting(false);
         SetDeviceState(kDeviceStateWifiConfiguring);
@@ -1479,7 +1533,7 @@ void Application::HandleStateChangedEvent() {
     auto display = board.GetDisplay();
     auto led = board.GetLed();
     led->OnStateChanged();
-    
+
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
@@ -1507,7 +1561,7 @@ void Application::HandleStateChangedEvent() {
                 if (listening_mode_ == kListeningModeAutoStop) {
                     audio_service_.WaitForPlaybackQueueEmpty();
                 }
-                
+
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
@@ -1520,7 +1574,7 @@ void Application::HandleStateChangedEvent() {
             // Disable wake word detection in listening mode
             audio_service_.EnableWakeWordDetection(false);
 #endif
-            
+
             // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
             if (play_popup_on_listening_) {
                 play_popup_on_listening_ = false;
@@ -1541,7 +1595,7 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateWifiConfiguring:
             display->SetStatus(Lang::Strings::WIFI_CONFIG_MODE);
             display->SetEmotion("neutral");
-            display->SetChatMessage("system", "BLE 配网广播已开启");
+            display->SetChatMessage("system", "正在启动 BLE 配网");
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(false);
             break;
@@ -1814,7 +1868,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     }
 
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
 
@@ -1832,7 +1886,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);
         });
-    } else if (state == kDeviceStateListening) {   
+    } else if (state == kDeviceStateListening) {
         Schedule([this]() {
             if (protocol_) {
                 protocol_->CloseAudioChannel();

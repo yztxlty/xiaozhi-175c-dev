@@ -16,18 +16,44 @@ bool IsValidSessionId(const std::string& value) {
     }
     return true;
 }
+
+bool IsValidPairingToken(const std::string& token) {
+    return token.size() > 37 && token[36] == '.' &&
+           IsValidSessionId(token.substr(0, 36)) &&
+           token.find('\0', 37) == std::string::npos;
+}
 }  // namespace
 
-void PairingReceipt::Begin(const std::string& token, const std::string& ssid) {
-    std::string session_id;
-    if (token.size() > 37 && token[36] == '.' && IsValidSessionId(token.substr(0, 36))) {
-        session_id = token.substr(0, 36);
+bool ParseWifiConfigPayload(const std::string& payload, WifiConfig& config) {
+    size_t index = 0;
+    auto next = [&](std::string& value) {
+        if (index >= payload.size()) return false;
+        const auto length = static_cast<uint8_t>(payload[index++]);
+        if (index + length > payload.size()) return false;
+        value.assign(payload.data() + index, length);
+        index += length;
+        return true;
+    };
+    WifiConfig parsed;
+    if (!next(parsed.token) || !next(parsed.ssid) || !next(parsed.password) ||
+        index != payload.size() || !IsValidPairingToken(parsed.token) ||
+        parsed.ssid.empty() || parsed.ssid.size() > 32 || parsed.password.size() > 64 ||
+        parsed.ssid.find('\0') != std::string::npos ||
+        parsed.password.find('\0') != std::string::npos) {
+        return false;
     }
+    config = parsed;
+    return true;
+}
+
+bool PairingReceipt::Begin(const std::string& token, const std::string& ssid) {
+    if (!IsValidPairingToken(token) || ssid.empty() || ssid.size() > 32) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     target_ssid_ = ssid;
-    pending_session_id_ = session_id;
+    pending_session_id_ = token.substr(0, 36);
     completed_session_id_.clear();
     waiting_ = false;
+    return true;
 }
 
 void PairingReceipt::StartWaiting() {
@@ -38,21 +64,29 @@ void PairingReceipt::StartWaiting() {
 PairingReceipt::Result PairingReceipt::Complete(const std::string& ssid) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!waiting_) return Result::Ignored;
+    if (ssid != target_ssid_) return Result::Mismatch;
     waiting_ = false;
-    const bool matched = ssid == target_ssid_;
-    if (matched) completed_session_id_ = pending_session_id_;
+    completed_session_id_ = pending_session_id_;
     target_ssid_.clear();
     pending_session_id_.clear();
-    return matched ? Result::Matched : Result::Mismatch;
+    return Result::Matched;
 }
 
 bool PairingReceipt::CancelPending() {
     std::lock_guard<std::mutex> lock(mutex_);
-    const bool was_waiting = waiting_;
+    const bool was_pending = !target_ssid_.empty();
     waiting_ = false;
     target_ssid_.clear();
     pending_session_id_.clear();
-    return was_waiting;
+    return was_pending;
+}
+
+void PairingReceipt::Reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    waiting_ = false;
+    target_ssid_.clear();
+    pending_session_id_.clear();
+    completed_session_id_.clear();
 }
 
 void PairingReceipt::RestoreCompleted(const std::string& session_id) {

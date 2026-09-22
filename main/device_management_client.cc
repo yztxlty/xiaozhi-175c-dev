@@ -5,6 +5,7 @@
 #include "system_info.h"
 
 #include <cJSON.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 
 #include <algorithm>
@@ -47,14 +48,23 @@ void DeviceManagementClient::OnHeartbeat(std::function<void()> callback) {
     on_heartbeat_ = std::move(callback);
 }
 
-void DeviceManagementClient::Start() {
-    if (started_ || url_.empty() || token_.empty()) {
-        return;
+bool DeviceManagementClient::Start() {
+    bool expected = false;
+    if (!started_.compare_exchange_strong(expected, true)) return true;
+    if (url_.empty() || token_.empty()) {
+        started_ = false;
+        return false;
     }
-    started_ = true;
     running_ = true;
     ESP_LOGI(TAG, "Management url=%s", url_.c_str());
-    xTaskCreate(Run, "device_mgmt", 8192, this, 2, nullptr);
+    if (xTaskCreateWithCaps(Run, "device_mgmt", 8192, this, 2, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        started_ = false;
+        running_ = false;
+        ESP_LOGE(TAG, "Unable to allocate management worker");
+        return false;
+    }
+    return true;
 }
 
 void DeviceManagementClient::Stop() {
@@ -137,5 +147,12 @@ void DeviceManagementClient::Run(void* arg) {
     } catch (...) {
         ESP_LOGE(TAG, "Management task unknown exception");
     }
-    vTaskDelete(NULL);
+    {
+        std::lock_guard<std::mutex> lock(client->mutex_);
+        client->connected_ = false;
+        client->websocket_.reset();
+    }
+    client->running_ = false;
+    client->started_ = false;
+    vTaskDeleteWithCaps(nullptr);
 }
