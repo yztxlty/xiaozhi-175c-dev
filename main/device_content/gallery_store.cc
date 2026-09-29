@@ -114,6 +114,15 @@ GalleryStore& GalleryStore::GetInstance() {
     return instance;
 }
 
+void GalleryStore::Reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    resource_id_.clear();
+    content_version_.clear();
+    interval_sec_ = 5;
+    loop_ = true;
+    items_.clear();
+}
+
 bool GalleryStore::SafeId(const std::string& value) {
     return !value.empty() && value.size() <= 96 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
         return std::isalnum(c) || c == '_' || c == '-' || c == ':';

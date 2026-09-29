@@ -22,6 +22,7 @@ public:
     bool Load();
     bool Apply(const cJSON* params);
     bool DeleteItem(const std::string& item_id);
+    void Reset();
     size_t Count() const;
     Item ItemAt(size_t index) const;
     std::vector<Item> Items() const;

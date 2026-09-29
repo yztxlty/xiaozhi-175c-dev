@@ -14,6 +14,7 @@
 #include "device_content/role_visual_store.h"
 #include "device_content/role_animation_store.h"
 #include "device_content/gallery_store.h"
+#include "storage/content_storage.h"
 #include "watch/watch_face_store.h"
 #include "ssid_manager.h"
 #include "ydp_bootstrap.h"
@@ -402,26 +403,9 @@ void Application::ActivationTask() {
     // endpoints were already cached before the upgrade.
     ota_->MarkCurrentVersionValid();
     ota_->ConfirmPendingUpgrade();
-
-    // The pairing gate uses only the lightweight management channel. Do not
-    // initialize the voice protocol before the App receives this session receipt.
-    InitializeManagementClient();
-    while (management_client_ == nullptr || !management_client_->IsConnected()) {
-        if (management_client_ == nullptr) {
-            ESP_LOGW(TAG, "Management config unavailable, refresh in 1 second");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            if (ota_->CheckVersion() == ESP_OK) InitializeManagementClient();
-            continue;
-        }
-        management_client_->Start();
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    while (!ReportPairingReceipt()) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
     Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::BALANCED);
 
-    // YGSoul Device Auth v2: prove identity before opening the chat channel.
+    // YGSoul Device Auth v2: prove identity before opening either device channel.
     {
         auto& ydp = ygsoul::ydp::YdpClient::GetInstance();
         ydp.SetYdpEndpoint(CONFIG_YDP_ACTIVATION_BASE_URL);
@@ -456,6 +440,22 @@ void Application::ActivationTask() {
         }
     }
 
+    // The pairing gate uses only the lightweight management channel. Do not
+    // initialize the voice protocol before the App receives this session receipt.
+    InitializeManagementClient();
+    while (management_client_ == nullptr || !management_client_->IsConnected()) {
+        if (management_client_ == nullptr) {
+            ESP_LOGW(TAG, "Management config unavailable, refresh in 1 second");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            if (ota_->CheckVersion() == ESP_OK) InitializeManagementClient();
+            continue;
+        }
+        management_client_->Start();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    while (!ReportPairingReceipt()) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
     InitializeProtocol();
 
     // Signal completion to main loop
@@ -691,6 +691,7 @@ void Application::InitializeProtocol() {
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
+            const bool is_final = cJSON_IsTrue(cJSON_GetObjectItem(root, "is_final"));
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
                 if (show_asr_text_) {
@@ -704,6 +705,16 @@ void Application::InitializeProtocol() {
                     // Pairing voice commands only.
                 } else if (GetDeviceState() == kDeviceStateWifiConfiguring) {
                     AbortSpeaking(kAbortReasonNone);
+                } else if (is_final) {
+                    Schedule([this]() {
+                        if (voice_session_active_.load() && GetDeviceState() == kDeviceStateListening)
+                            RoleAnimationStore::GetInstance().Show("thinking");
+                    });
+                } else {
+                    Schedule([this]() {
+                        if (voice_session_active_.load() && GetDeviceState() == kDeviceStateListening)
+                            RoleAnimationStore::GetInstance().Show("listening");
+                    });
                 }
             }
         } else if (strcmp(type->valuestring, "opening") == 0) {
@@ -884,6 +895,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         board.GetDisplay()->PrepareGalleryDownload();
         succeeded = RoleAnimationStore::GetInstance().Apply(params, request_id->valuestring);
+        if (!succeeded) RoleAnimationStore::GetInstance().Resume();
         if (restore_low_power) board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         command_changes_telemetry = succeeded;
         if (!succeeded) error_code = "role_animation_apply_failed";
@@ -1005,6 +1017,18 @@ void Application::HandleCustomMessage(const cJSON* root) {
         if (succeeded) deleted_gallery_item_id = item_id->valuestring;
         command_changes_telemetry = succeeded;
         if (!succeeded) error_code = cJSON_IsString(item_id) ? "gallery_delete_failed" : "invalid_params";
+    } else if (strcmp(command->valuestring, "clearGallery") == 0) {
+        board.GetDisplay()->PrepareGalleryDownload();
+        succeeded = ContentStorage::GetInstance().FormatGallery();
+        if (succeeded) {
+            GalleryStore::GetInstance().Reset();
+            RoleAnimationStore::GetInstance().Reset();
+            board.GetDisplay()->RefreshGallery();
+        } else {
+            RoleAnimationStore::GetInstance().Resume();
+        }
+        command_changes_telemetry = succeeded;
+        if (!succeeded) error_code = "gallery_clear_failed";
     } else if (strcmp(command->valuestring, "unbind") == 0) {
         // CRITICAL-RUNTIME-CONTRACT: App unbind is a re-pair operation. ACK first,
         // then clear local Wi-Fi and enter provisioning; ordinary reboot never clears Wi-Fi.
@@ -1032,6 +1056,9 @@ void Application::HandleCustomMessage(const cJSON* root) {
         if (succeeded && strcmp(command->valuestring, "getRoleAnimations") == 0) {
             RoleAnimationStore::GetInstance().AddReported(reported);
         }
+        if (succeeded && strcmp(command->valuestring, "clearGallery") == 0) {
+            RoleAnimationStore::GetInstance().AddReported(reported);
+        }
         if (succeeded && strcmp(command->valuestring, "prepareRoleVisual") == 0) {
             auto params = cJSON_GetObjectItem(payload, "params");
             auto resource_id = cJSON_IsObject(params) ? cJSON_GetObjectItem(params, "resourceId") : nullptr;
@@ -1051,7 +1078,8 @@ void Application::HandleCustomMessage(const cJSON* root) {
             cJSON_AddBoolToObject(reported, "storageCleaned", true);
         }
         if (succeeded && (strcmp(command->valuestring, "applyGallery") == 0 ||
-                          strcmp(command->valuestring, "deleteGalleryItem") == 0)) {
+                          strcmp(command->valuestring, "deleteGalleryItem") == 0 ||
+                          strcmp(command->valuestring, "clearGallery") == 0)) {
             auto& gallery = GalleryStore::GetInstance();
             cJSON_AddStringToObject(reported, "galleryResourceId", gallery.ResourceId().c_str());
             cJSON_AddStringToObject(reported, "galleryContentVersion", gallery.ContentVersion().c_str());
@@ -1537,7 +1565,7 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
-            RoleAnimationStore::GetInstance().Restore();
+            if (!RoleAnimationStore::GetInstance().Show("idle")) RoleAnimationStore::GetInstance().Restore();
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
@@ -1732,6 +1760,7 @@ void Application::EnterVoiceDismissed() {
     // intentionally preserves the WebSocket for direct wake-word resume.
     ESP_LOGI(TAG, "Voice dismissed, wait for acknowledgement TTS");
     voice_dismissed_ = true;
+    RoleAnimationStore::GetInstance().Show("faint");
 }
 
 void Application::ListenForPairingCommand() {

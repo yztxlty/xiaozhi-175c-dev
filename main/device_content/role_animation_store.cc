@@ -5,6 +5,7 @@
 #include "display.h"
 #include "settings.h"
 #include "storage/content_storage.h"
+#include "system_info.h"
 
 #include <esp_log.h>
 #include <cJSON.h>
@@ -14,12 +15,13 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
 
 #define TAG "RoleAnimationStore"
 
 namespace {
-constexpr size_t kMaxFileBytes = 192 * 1024;
-constexpr size_t kMaxTotalBytes = 2 * kMaxFileBytes;
+constexpr size_t kMaxFileBytes = 512 * 1024;
+constexpr size_t kMaxTotalBytes = 5 * kMaxFileBytes;
 
 std::string DigestHex(const unsigned char digest[32]) {
     char value[65] = {};
@@ -37,7 +39,8 @@ bool SafeId(const std::string& value) {
 }
 
 bool SupportedAction(const std::string& action) {
-    return action == "listening" || action == "speaking";
+    return action == "idle" || action == "faint" || action == "listening" ||
+           action == "speaking" || action == "thinking";
 }
 
 bool Download(const std::string& url, const std::string& path, const std::string& sha256,
@@ -46,9 +49,13 @@ bool Download(const std::string& url, const std::string& path, const std::string
         expected_bytes > kMaxFileBytes)
         return false;
     auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
-    http->SetTimeout(20000);
+    http->SetTimeout(90000);
+    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     if (!http->Open("GET", url) || http->GetStatusCode() != 200 ||
         http->GetBodyLength() != expected_bytes) {
+        ESP_LOGE(TAG, "Animation download rejected: status=%d body=%u expected=%u",
+                 http->GetStatusCode(), static_cast<unsigned>(http->GetBodyLength()),
+                 static_cast<unsigned>(expected_bytes));
         http->Close();
         return false;
     }
@@ -67,6 +74,8 @@ bool Download(const std::string& url, const std::string& path, const std::string
     while (total < expected_bytes) {
         const int read = http->Read(buffer, std::min(sizeof(buffer), expected_bytes - total));
         if (read <= 0 || fwrite(buffer, 1, read, file) != static_cast<size_t>(read)) {
+            ESP_LOGE(TAG, "Animation download stopped: read=%d received=%u expected=%u",
+                     read, static_cast<unsigned>(total), static_cast<unsigned>(expected_bytes));
             ok = false;
             break;
         }
@@ -84,6 +93,9 @@ bool Download(const std::string& url, const std::string& path, const std::string
     mbedtls_sha256_free(&sha);
     std::string expected = sha256;
     std::transform(expected.begin(), expected.end(), expected.begin(), ::tolower);
+    if (!ok || DigestHex(digest) != expected)
+        ESP_LOGE(TAG, "Animation file validation failed: bytes=%u expected=%u",
+                 static_cast<unsigned>(total), static_cast<unsigned>(expected_bytes));
     return ok && DigestHex(digest) == expected;
 }
 
@@ -137,7 +149,7 @@ std::string RoleAnimationStore::ManifestPath(const std::string& slot) const {
 }
 
 bool RoleAnimationStore::Load() {
-    const std::string slot = Settings("companion", false).GetString("role_animation_slot");
+    const std::string slot = Settings("companion", false).GetString("role_anim_slot");
     if (slot != "a" && slot != "b")
         return true;
     FILE* file = fopen(ManifestPath(slot).c_str(), "rb");
@@ -169,7 +181,7 @@ bool RoleAnimationStore::Load() {
         return false;
     }
     std::vector<Item> loaded;
-    bool valid = cJSON_GetArraySize(actions) >= 1 && cJSON_GetArraySize(actions) <= 2;
+    bool valid = cJSON_GetArraySize(actions) >= 1 && cJSON_GetArraySize(actions) <= 5;
     cJSON* row = nullptr;
     cJSON_ArrayForEach (row, actions) {
         auto action = cJSON_GetObjectItem(row, "actionCode");
@@ -268,14 +280,15 @@ bool RoleAnimationStore::Apply(const cJSON* params, const std::string& request_i
         !cJSON_IsNumber(revision) || !cJSON_IsString(expected_sha) ||
         strlen(expected_sha->valuestring) != 64 || !cJSON_IsArray(actions) ||
         strcmp(role->valuestring, companion.GetString("active_role").c_str()) != 0 ||
-        config->valueint != companion.GetInt("cfg_rev", 0))
+        // Cloud-only model updates can advance the server revision without changing device config.
+        config->valueint < companion.GetInt("cfg_rev", 0))
         return false;
     if (request_id == last_request_id_)
         return manifest_sha256_ == expected_sha->valuestring;
     if (base->valueint != revision_)
         return false;
     const int count = cJSON_GetArraySize(actions);
-    if (count < 1 || count > 2)
+    if (count < 1 || count > 5)
         return false;
 
     const std::vector<Item> previous_items = items_;
@@ -332,6 +345,9 @@ bool RoleAnimationStore::Apply(const cJSON* params, const std::string& request_i
         if (path.empty() ||
             !ContentStorage::GetInstance().CanReserve(ContentStorage::Category::Gallery, size) ||
             !Download(url->valuestring, temporary, sha->valuestring, size)) {
+            ESP_LOGE(TAG, "Animation action staging failed: action=%s galleryFree=%u",
+                     action->valuestring,
+                     static_cast<unsigned>(ContentStorage::GetInstance().GetStats().gallery_free_bytes));
             if (!temporary.empty())
                 std::remove(temporary.c_str());
             return rollback();
@@ -342,20 +358,22 @@ bool RoleAnimationStore::Apply(const cJSON* params, const std::string& request_i
             return rollback();
         }
         staged.push_back(path);
-        if (!Board::GetInstance().GetDisplay()->ValidateRoleImage(path.c_str(), "eaf"))
+        if (!Board::GetInstance().GetDisplay()->ValidateRoleImage(path.c_str(), "eaf")) {
+            ESP_LOGE(TAG, "Animation display validation failed: action=%s", action->valuestring);
             return rollback();
+        }
         incoming_actions.push_back({action->valuestring, asset->valuestring,
                                     asset_version->valueint, path, sha->valuestring, size});
     }
     if (CanonicalManifestSha256(manifest) != expected_sha->valuestring)
         return rollback();
-    const std::string active_slot = companion.GetString("role_animation_slot", "a");
+    const std::string active_slot = companion.GetString("role_anim_slot", "a");
     const std::string inactive_slot = active_slot == "a" ? "b" : "a";
     last_request_id_ = request_id;
     if (!SaveManifest(inactive_slot, manifest, incoming_actions))
         return rollback();
     Settings writable("companion", true);
-    writable.SetString("role_animation_slot", inactive_slot);
+    writable.SetString("role_anim_slot", inactive_slot);
     role_id_ = role->valuestring;
     configuration_revision_ = config->valueint;
     revision_ = revision->valueint;
@@ -368,7 +386,7 @@ bool RoleAnimationStore::Apply(const cJSON* params, const std::string& request_i
         if (!retained)
             std::remove(previous.path.c_str());
     }
-    current_action_.clear();
+    Resume();
     return true;
 }
 
@@ -386,6 +404,14 @@ bool RoleAnimationStore::Show(const std::string& action_code) {
     return true;
 }
 
+void RoleAnimationStore::Resume() {
+    const std::string visible_action = current_action_;
+    current_action_.clear();
+    if (!visible_action.empty() && Show(visible_action))
+        return;
+    RoleVisualStore::GetInstance().LoadActive();
+}
+
 void RoleAnimationStore::Restore() {
     if (current_action_.empty())
         return;
@@ -398,9 +424,22 @@ void RoleAnimationStore::Restore() {
 }
 
 void RoleAnimationStore::ClearForRoleChange(const std::string& role_id) {
-    if (role_id_.empty() || role_id_ == role_id)
+    if (!role_id_.empty() && role_id_ == role_id)
         return;
-    Settings("companion", true).EraseKey("role_animation_slot");
+    DIR* directory = opendir("/gallery");
+    if (directory != nullptr) {
+        while (const auto* entry = readdir(directory)) {
+            const std::string name = entry->d_name;
+            if (name.rfind("ra_", 0) == 0 && name.size() > 7 &&
+                name.substr(name.size() - 4) == ".eaf") {
+                const auto path = ContentStorage::GetInstance().GetPath(
+                    ContentStorage::Category::Gallery, name);
+                if (!path.empty()) std::remove(path.c_str());
+            }
+        }
+        closedir(directory);
+    }
+    Settings("companion", true).EraseKey("role_anim_slot");
     role_id_.clear();
     revision_ = 0;
     configuration_revision_ = 0;
@@ -410,9 +449,22 @@ void RoleAnimationStore::ClearForRoleChange(const std::string& role_id) {
     Restore();
 }
 
+void RoleAnimationStore::Reset() {
+    Settings("companion", true).EraseKey("role_anim_slot");
+    role_id_.clear();
+    revision_ = 0;
+    configuration_revision_ = 0;
+    manifest_sha256_.clear();
+    last_request_id_.clear();
+    current_action_.clear();
+    items_.clear();
+    Resume();
+}
+
 void RoleAnimationStore::AddReported(cJSON* reported, const std::string& request_id) const {
-    cJSON_AddStringToObject(reported, "activeRoleId", role_id_.c_str());
-    cJSON_AddNumberToObject(reported, "configurationRevision", configuration_revision_);
+    const auto storage = ContentStorage::GetInstance().GetStats();
+    cJSON_AddNumberToObject(reported, "roleAnimationGalleryUsedBytes", storage.gallery_bytes);
+    cJSON_AddNumberToObject(reported, "roleAnimationGalleryFreeBytes", storage.gallery_free_bytes);
     cJSON_AddNumberToObject(reported, "roleAnimationRevision", revision_);
     cJSON_AddStringToObject(reported, "roleAnimationManifestSha256", manifest_sha256_.c_str());
     cJSON_AddStringToObject(reported, "lastRoleAnimationRequestId",

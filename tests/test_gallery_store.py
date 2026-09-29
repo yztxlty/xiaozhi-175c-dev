@@ -59,13 +59,64 @@ def test_gallery_deletion_reports_exact_item_for_app_and_device_initiated_paths(
     assert 'ReportGalleryItemDeleted(item.item_id)' in board
 
 
+def test_explicit_gallery_clear_formats_only_gallery_and_resets_both_inventories():
+    storage = (ROOT / 'main/storage/content_storage.cc').read_text(encoding='utf-8')
+    app = (ROOT / 'main/application.cc').read_text(encoding='utf-8')
+    assert 'esp_vfs_fat_spiflash_format_rw_wl(kGalleryMountPoint, kGalleryPartitionLabel)' in storage
+    assert 'strcmp(command->valuestring, "clearGallery") == 0' in app
+    assert 'GalleryStore::GetInstance().Reset()' in app
+    assert 'RoleAnimationStore::GetInstance().Reset()' in app
+
+
+def test_device_gallery_requires_confirmation_before_deleting_file():
+    board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text(encoding='utf-8')
+    open_dialog = board[board.index('static void DeleteGalleryItemCallback'):board.index('static void ConfirmGalleryDeleteCallback')]
+    confirm = board[board.index('static void ConfirmGalleryDeleteCallback'):board.index('void RenderFeatures()')]
+    assert 'DeleteItem(' not in open_dialog
+    assert 'DeleteItem(' in confirm
+    assert '删除这张图片？' in board
+
+
+def test_gallery_delete_confirmation_controls_fit_inside_panel_without_clipping():
+    board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text(encoding='utf-8')
+    dialog = board[board.index('static void DeleteGalleryItemCallback'):board.index('static void CancelGalleryDeleteCallback')]
+    assert 'lv_obj_set_pos(panel, 58, 140)' in dialog
+    assert 'lv_obj_set_size(panel, 350, 186)' in dialog
+    assert 'lv_obj_set_style_pad_all(panel, 0, 0)' in dialog
+    assert 'lv_obj_set_pos(object, x, 124)' in dialog
+    assert 'lv_obj_set_size(object, 148, 48)' in dialog
+    assert 'button("取消", 18' in dialog
+    assert 'button("删除", 184' in dialog
+    assert 'LV_STATE_PRESSED' in dialog
+    assert 'lv_obj_set_style_transform_scale(object, 245, LV_STATE_PRESSED)' in dialog
+
+
+def test_gallery_trash_button_has_pressed_feedback():
+    board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text(encoding='utf-8')
+    gallery = board[board.index('void RenderGallery()'):board.index('void RenderSettings()')]
+    assert 'lv_obj_set_style_bg_color(gallery_delete_, lv_color_hex(0xA956BD), LV_STATE_PRESSED)' in gallery
+    assert 'lv_obj_set_style_transform_scale(gallery_delete_, 230, LV_STATE_PRESSED)' in gallery
+
+
+def test_device_gallery_delete_button_appears_after_two_second_press():
+    board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text(encoding='utf-8')
+    gallery = board[board.index('void RenderGallery()'):board.index('void RenderSettings()')]
+    assert 'gallery_delete_ = CreateLauncherButton' in gallery
+    assert 'lv_obj_add_flag(gallery_delete_, LV_OBJ_FLAG_HIDDEN)' in gallery
+    assert 'lv_obj_add_flag(gallery_image_, LV_OBJ_FLAG_CLICKABLE)' in gallery
+    assert 'GalleryPressCallback' in gallery
+    assert 'GalleryReleaseCallback' in gallery
+    assert 'kGalleryDeleteRevealMs = 2000' in board
+    assert 'lv_obj_add_event_cb(gallery_delete_, DeleteGalleryItemCallback, LV_EVENT_CLICKED, this)' in gallery
+
+
 def test_gallery_commands_and_ui_are_real_and_horizontal():
     app = (ROOT / 'main/application.cc').read_text()
     board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text()
     assert 'applyGallery' in app
     assert 'deleteGalleryItem' in app
     assert 'GalleryStore::GetInstance()' in app
-    assert 'LV_EVENT_LONG_PRESSED' in board
+    assert 'GalleryPressCallback' in board and 'GalleryReleaseCallback' in board
     assert 'DeleteGalleryItemCallback' in board
     assert 'SwitchGalleryHorizontal' in board
     assert '220' in board
