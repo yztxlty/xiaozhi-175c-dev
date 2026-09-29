@@ -37,6 +37,7 @@ public:
 
     void Bootstrap(const std::string& ydp_endpoint, BootstrapCallback callback);
     void Activate(const std::string& ydp_endpoint, ActivateCallback callback);
+    void ProveFactory(const std::string& ydp_endpoint, ActivateCallback callback);
     void Refresh(const std::string& ydp_endpoint, ActivateCallback callback);
 
 private:

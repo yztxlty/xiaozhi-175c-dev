@@ -153,6 +153,13 @@ ContentStorage::Stats ContentStorage::GetStats() const {
     return stats;
 }
 
+bool ContentStorage::FormatGallery() {
+    if (health_ != Health::Ready || gallery_wl_handle_ < 0) return false;
+    const esp_err_t result = esp_vfs_fat_spiflash_format_rw_wl(kGalleryMountPoint, kGalleryPartitionLabel);
+    if (result != ESP_OK) ESP_LOGE(TAG, "Failed to format gallery: %s", esp_err_to_name(result));
+    return result == ESP_OK;
+}
+
 bool ContentStorage::CanReserve(Category category, size_t bytes) const {
     return health_ == Health::Ready && CanReserve(GetStats(), category, bytes);
 }

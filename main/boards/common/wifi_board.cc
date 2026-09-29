@@ -400,7 +400,7 @@ std::string WifiBoard::GetDeviceStatusJson() {
     auto& board = Board::GetInstance();
     auto root = cJSON_CreateObject();
 
-    auto vendor_sn = SystemInfo::GetMacAddress();
+    auto vendor_sn = SystemInfo::GetDeviceId();
     vendor_sn.erase(std::remove(vendor_sn.begin(), vendor_sn.end(), ':'), vendor_sn.end());
     cJSON_AddStringToObject(root, "vendorSn", vendor_sn.c_str());
     cJSON_AddStringToObject(root, "productKey", "ESP32S3");
@@ -429,15 +429,18 @@ std::string WifiBoard::GetDeviceStatusJson() {
     auto capability = cJSON_AddObjectToObject(root, "roleAnimation");
     cJSON_AddNumberToObject(capability, "protocolVersion", 1);
     auto actions = cJSON_AddArrayToObject(capability, "supportedActions");
+    cJSON_AddItemToArray(actions, cJSON_CreateString("idle"));
+    cJSON_AddItemToArray(actions, cJSON_CreateString("faint"));
     cJSON_AddItemToArray(actions, cJSON_CreateString("listening"));
     cJSON_AddItemToArray(actions, cJSON_CreateString("speaking"));
+    cJSON_AddItemToArray(actions, cJSON_CreateString("thinking"));
     auto formats = cJSON_AddArrayToObject(capability, "formats");
     cJSON_AddItemToArray(formats, cJSON_CreateString("eaf"));
     cJSON_AddNumberToObject(capability, "width", 466);
     cJSON_AddNumberToObject(capability, "height", 466);
     cJSON_AddNumberToObject(capability, "maxFps", 10);
-    cJSON_AddNumberToObject(capability, "maxFileBytes", 192 * 1024);
-    cJSON_AddNumberToObject(capability, "maxActions", 2);
+    cJSON_AddNumberToObject(capability, "maxFileBytes", 512 * 1024);
+    cJSON_AddNumberToObject(capability, "maxActions", 5);
     cJSON_AddBoolToObject(capability, "atomicApply", true);
 
     // Audio speaker

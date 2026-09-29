@@ -298,7 +298,7 @@ void MusicClient::Run(void* arg) {
         auto websocket = Board::GetInstance().GetNetwork()->CreateWebSocket(2);
         websocket->SetHeader("Authorization", ("Bearer " + self->token_).c_str());
         websocket->SetHeader("Protocol-Version", "1");
-        websocket->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+        websocket->SetHeader("Device-Id", SystemInfo::GetDeviceId().c_str());
         websocket->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
         websocket->OnData([self](const char* data, size_t size, bool binary) {
             if (binary) self->HandleBinary(reinterpret_cast<const uint8_t*>(data), size);

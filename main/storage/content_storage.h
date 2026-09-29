@@ -41,6 +41,7 @@ public:
     ~ContentStorage();
 
     bool Initialize();
+    bool FormatGallery();
     Stats GetStats() const;
     bool CanReserve(Category category, size_t bytes) const;
     std::string GetPath(Category category, const std::string& file_name) const;
@@ -84,7 +85,9 @@ public:
             return false;
         }
         const size_t free = category == Category::Gallery ? stats.gallery_free_bytes : stats.free_bytes;
-        return free > kSafetyReserveBytes && bytes <= free - kSafetyReserveBytes;
+        // Gallery is a dedicated partition; the larger shared-content reserve blocks atomic set switches.
+        const size_t reserve = category == Category::Gallery ? 512 * 1024 : kSafetyReserveBytes;
+        return free > reserve && bytes <= free - reserve;
     }
 
     static std::string BuildPath(Category category, const std::string& file_name) {

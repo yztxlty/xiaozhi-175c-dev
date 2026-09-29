@@ -78,8 +78,7 @@ def test_watch_page_is_not_preempted_by_automatic_conversation_updates():
     assert role_image.count("page() != YGSoulPage::kWatch") >= 2
     assert "page() == YGSoulPage::kWatch" in chat
     assert "lv_obj_move_foreground(launcher_panel_)" in chat
-    assert "const bool keep_watch = launcher_state_.page() == YGSoulPage::kWatch" in download
-    assert "ReleaseLauncherTransition(keep_watch);" in download
+    assert "ReleaseLauncherTransition(launcher_state_.page() != YGSoulPage::kDesktop);" in download
     assert "StopWatchClock();" not in download
 
 
@@ -125,6 +124,15 @@ def test_sensor_io_is_sampled_on_main_task_and_watch_reads_cache_only():
     assert "pedometer_->Read" not in step_getter
     assert "battery_level_.load()" in battery_getter
     assert "step_count_.load()" in step_getter
+
+
+def test_low_battery_below_five_percent_requests_pmic_poweroff_once_while_discharging():
+    board = BOARD.read_text()
+    refresh = board[board.index("virtual void RefreshDynamicData() override") : board.index("virtual void SetPowerSaveLevel")]
+    assert "battery_level < 5" in refresh
+    assert "discharging" in refresh
+    assert "pmic_->PowerOff()" in refresh
+    assert "low_battery_shutdown_requested_" in refresh
 
 
 def test_network_connection_starts_background_sntp_before_pairing_return():

@@ -22,8 +22,10 @@ public:
     bool Load();
     bool Apply(const cJSON* params, const std::string& request_id);
     bool Show(const std::string& action_code);
+    void Resume();
     void Restore();
     void ClearForRoleChange(const std::string& role_id);
+    void Reset();
     void AddReported(cJSON* reported, const std::string& request_id = "") const;
 
 private:

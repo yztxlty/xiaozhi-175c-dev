@@ -60,7 +60,7 @@ std::unique_ptr<Http> Ota::SetupHttp() {
     auto http = network->CreateHttp(0);
     auto user_agent = SystemInfo::GetUserAgent();
     http->SetHeader("Activation-Version", has_serial_number_ ? "2" : "1");
-    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+    http->SetHeader("Device-Id", SystemInfo::GetDeviceId().c_str());
     http->SetHeader("Client-Id", board.GetUuid());
     if (has_serial_number_) {
         http->SetHeader("Serial-Number", serial_number_.c_str());

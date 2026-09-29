@@ -265,6 +265,8 @@ private:
     lv_obj_t* gallery_image_ = nullptr;
     lv_obj_t* gallery_mouth_ = nullptr;
     lv_obj_t* gallery_delete_ = nullptr;
+    lv_obj_t* gallery_confirm_ = nullptr;
+    lv_timer_t* gallery_delete_reveal_timer_ = nullptr;
     std::unique_ptr<LvglImage> gallery_asset_;
     void* gallery_asset_bytes_ = nullptr;
     lv_obj_t* brightness_slider_ = nullptr;
@@ -372,12 +374,17 @@ private:
             lv_timer_delete(gallery_timer_);
             gallery_timer_ = nullptr;
         }
+        if (gallery_delete_reveal_timer_ != nullptr) {
+            lv_timer_delete(gallery_delete_reveal_timer_);
+            gallery_delete_reveal_timer_ = nullptr;
+        }
         if (gallery_image_ != nullptr) {
             lv_obj_delete(gallery_image_);
             gallery_image_ = nullptr;
         }
         gallery_mouth_ = nullptr;
         gallery_delete_ = nullptr;
+        gallery_confirm_ = nullptr;
         gallery_asset_.reset();
         if (gallery_asset_bytes_ != nullptr) {
             heap_caps_free(gallery_asset_bytes_);
@@ -783,20 +790,106 @@ private:
         self->SwitchGalleryHorizontal(true);
     }
 
-    static void GalleryLongPressCallback(lv_event_t* event) {
+    static constexpr uint32_t kGalleryDeleteRevealMs = 2000;
+
+    static void GalleryDeleteRevealTimerCallback(lv_timer_t* timer) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
+        if (!self) return;
+        self->gallery_delete_reveal_timer_ = nullptr;
+        if (self->launcher_state_.page() != YGSoulPage::kGallery || !self->gallery_delete_) return;
+        if (self->gallery_timer_) lv_timer_pause(self->gallery_timer_);
+        lv_obj_remove_flag(self->gallery_delete_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    static void GalleryPressCallback(lv_event_t* event) {
         auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(event));
-        if (self && self->gallery_delete_) lv_obj_remove_flag(self->gallery_delete_, LV_OBJ_FLAG_HIDDEN);
+        if (!self || !self->gallery_delete_ || !lv_obj_has_flag(self->gallery_delete_, LV_OBJ_FLAG_HIDDEN)) return;
+        if (self->gallery_timer_) lv_timer_pause(self->gallery_timer_);
+        if (self->gallery_delete_reveal_timer_) lv_timer_delete(self->gallery_delete_reveal_timer_);
+        self->gallery_delete_reveal_timer_ = lv_timer_create(GalleryDeleteRevealTimerCallback, kGalleryDeleteRevealMs, self);
+        lv_timer_set_repeat_count(self->gallery_delete_reveal_timer_, 1);
+    }
+
+    static void GalleryReleaseCallback(lv_event_t* event) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(event));
+        if (!self || !self->gallery_delete_reveal_timer_) return;
+        lv_timer_delete(self->gallery_delete_reveal_timer_);
+        self->gallery_delete_reveal_timer_ = nullptr;
+        if (self->gallery_timer_) lv_timer_resume(self->gallery_timer_);
     }
 
     static void DeleteGalleryItemCallback(lv_event_t* event) {
         auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(event));
-        if (!self) return;
+        if (!self || self->gallery_confirm_) return;
+        if (self->gallery_timer_) lv_timer_pause(self->gallery_timer_);
+        auto overlay = lv_obj_create(self->launcher_content_);
+        self->gallery_confirm_ = overlay;
+        lv_obj_set_size(overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        lv_obj_set_pos(overlay, 0, 0);
+        lv_obj_set_style_radius(overlay, 0, 0);
+        lv_obj_set_style_border_width(overlay, 0, 0);
+        lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(overlay, LV_OPA_70, 0);
+        lv_obj_set_style_pad_all(overlay, 0, 0);
+        lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+        auto panel = lv_obj_create(overlay);
+        lv_obj_set_pos(panel, 58, 140);
+        lv_obj_set_size(panel, 350, 186);
+        lv_obj_set_style_radius(panel, 28, 0);
+        lv_obj_set_style_bg_color(panel, lv_color_hex(0x2A2149), 0);
+        lv_obj_set_style_bg_grad_color(panel, lv_color_hex(0x3B2E68), 0);
+        lv_obj_set_style_bg_grad_dir(panel, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_border_color(panel, lv_color_hex(0xB6A6FF), 0);
+        lv_obj_set_style_border_width(panel, 1, 0);
+        lv_obj_set_style_pad_all(panel, 0, 0);
+        lv_obj_set_style_shadow_width(panel, 18, 0);
+        lv_obj_set_style_shadow_color(panel, lv_color_black(), 0);
+        lv_obj_set_style_shadow_opa(panel, LV_OPA_40, 0);
+        lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+        self->CreateLabel(panel, "删除这张图片？", 20, 24, 310, lv_color_white());
+        self->CreateSmallLabel(panel, "删除后无法恢复，请确认操作", 20, 62, 310, lv_color_hex(0xCEC2ED));
+        auto button = [&](const char* title, int x, bool destructive, lv_event_cb_t callback) {
+            auto object = lv_button_create(panel);
+            lv_obj_set_pos(object, x, 124);
+            lv_obj_set_size(object, 148, 48);
+            lv_obj_set_style_radius(object, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(object, lv_color_hex(destructive ? 0xD94F70 : 0x514573), 0);
+            lv_obj_set_style_bg_color(object, lv_color_hex(destructive ? 0xB83C5B : 0x75669D), LV_STATE_PRESSED);
+            lv_obj_set_style_border_width(object, 0, 0);
+            lv_obj_set_style_shadow_width(object, destructive ? 10 : 0, 0);
+            lv_obj_set_style_shadow_color(object, lv_color_hex(0xD94F70), 0);
+            lv_obj_set_style_shadow_opa(object, destructive ? LV_OPA_30 : LV_OPA_0, 0);
+            lv_obj_set_style_transform_scale(object, 245, LV_STATE_PRESSED);
+            lv_obj_remove_flag(object, LV_OBJ_FLAG_GESTURE_BUBBLE);
+            auto label = lv_label_create(object);
+            lv_label_set_text(label, title);
+            lv_obj_set_style_text_color(label, lv_color_white(), 0);
+            lv_obj_center(label);
+            lv_obj_add_event_cb(object, callback, LV_EVENT_CLICKED, self);
+        };
+        button("取消", 18, false, CancelGalleryDeleteCallback);
+        button("删除", 184, true, ConfirmGalleryDeleteCallback);
+    }
+
+    static void CancelGalleryDeleteCallback(lv_event_t* event) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(event));
+        if (!self || !self->gallery_confirm_) return;
+        lv_obj_delete(self->gallery_confirm_);
+        self->gallery_confirm_ = nullptr;
+        if (self->gallery_timer_) lv_timer_resume(self->gallery_timer_);
+    }
+
+    static void ConfirmGalleryDeleteCallback(lv_event_t* event) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(event));
+        if (!self || !self->gallery_confirm_) return;
         auto& store = GalleryStore::GetInstance();
         const auto item = store.ItemAt(self->launcher_state_.gallery_index());
         if (!item.item_id.empty() && store.DeleteItem(item.item_id)) {
             Application::GetInstance().ReportGalleryItemDeleted(item.item_id);
             self->launcher_state_.SetGalleryCount(store.Count());
             self->RenderLauncher();
+        } else {
+            CancelGalleryDeleteCallback(event);
         }
     }
 
@@ -1128,8 +1221,14 @@ private:
             lv_image_set_scale(gallery_image_, width_scale > height_scale ? width_scale : height_scale);
         }
         lv_obj_align(gallery_image_, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_add_event_cb(gallery_image_, GalleryLongPressCallback, LV_EVENT_LONG_PRESSED, this);
+        lv_obj_add_flag(gallery_image_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(gallery_image_, GalleryPressCallback, LV_EVENT_PRESSED, this);
+        lv_obj_add_event_cb(gallery_image_, GalleryReleaseCallback, LV_EVENT_RELEASED, this);
+        lv_obj_add_event_cb(gallery_image_, GalleryReleaseCallback, LV_EVENT_PRESS_LOST, this);
         gallery_delete_ = CreateLauncherButton("", 341, 102, 56, 56);
+        lv_obj_set_style_bg_color(gallery_delete_, lv_color_hex(0xA956BD), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(gallery_delete_, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_set_style_transform_scale(gallery_delete_, 230, LV_STATE_PRESSED);
         CreateIcon(gallery_delete_, FONT_AWESOME_TRASH, 1, 12, 54, lv_color_white());
         lv_obj_add_flag(gallery_delete_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_event_cb(gallery_delete_, DeleteGalleryItemCallback, LV_EVENT_CLICKED, this);
@@ -1615,10 +1714,10 @@ public:
     void PrepareGalleryDownload() override {
         DisplayLockGuard lock(this);
         if (!lock) return;
-        const bool keep_watch = launcher_state_.page() == YGSoulPage::kWatch;
-        StopGalleryAnimation();
-        StopRoleAnimation();
-        ReleaseLauncherTransition(keep_watch);
+        if (launcher_transition_image_ != nullptr) {
+            lv_anim_delete(launcher_transition_image_, SetPanelY);
+            ReleaseLauncherTransition(launcher_state_.page() != YGSoulPage::kDesktop);
+        }
         ESP_LOGI(TAG, "Released transient visuals for download, free internal=%u",
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
     }
@@ -1691,7 +1790,7 @@ public:
             return false;
         }
         const long size = ftell(file);
-        if (size <= 0 || size > 192 * 1024 || fseek(file, 0, SEEK_SET) != 0) {
+        if (size <= 0 || size > 512 * 1024 || fseek(file, 0, SEEK_SET) != 0) {
             fclose(file);
             return false;
         }
@@ -1751,7 +1850,8 @@ public:
             return false;
         }
         const long size = ftell(file);
-        if (size <= 0 || size > 192 * 1024 || fseek(file, 0, SEEK_SET) != 0) {
+        if (size <= 0 || size > (strcmp(format, "eaf") == 0 ? 512 * 1024 : 192 * 1024) ||
+            fseek(file, 0, SEEK_SET) != 0) {
             fclose(file);
             return false;
         }
@@ -1906,6 +2006,7 @@ private:
     std::atomic_bool discharging_{false};
     std::atomic<uint32_t> step_count_{0};
     std::atomic_bool steps_available_{false};
+    bool low_battery_shutdown_requested_ = false;
     bool last_discharging_ = false;
     Button boot_button_;
     CustomLcdDisplay* display_;
@@ -2274,9 +2375,17 @@ public:
             power_save_timer_->SetEnabled(discharging);
             last_discharging_ = discharging;
         }
-        battery_level_.store(pmic_->GetBatteryLevel());
+        const int battery_level = pmic_->GetBatteryLevel();
+        battery_level_.store(battery_level);
         charging_.store(charging);
         discharging_.store(discharging);
+        if (!discharging || battery_level >= 5) {
+            low_battery_shutdown_requested_ = false;
+        } else if (battery_level >= 0 && battery_level < 5 && !low_battery_shutdown_requested_) {
+            low_battery_shutdown_requested_ = true;
+            ESP_LOGW(TAG, "Battery below 5%% while discharging; powering off");
+            pmic_->PowerOff();
+        }
 
         uint32_t steps = 0;
         const bool available = pedometer_ != nullptr && pedometer_->Read(steps);

@@ -3,6 +3,7 @@
 #include "ydp_device_auth.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 #include "board.h"
@@ -11,6 +12,8 @@
 #include "esp_hmac.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "mbedtls/md.h"
+#include "mbedtls/platform_util.h"
 #include "system_info.h"
 
 namespace ygsoul::ydp {
@@ -20,6 +23,7 @@ constexpr char kTag[] = "YdpBootstrap";
 constexpr char kChallengePath[] = "/ydp/v1/activation/challenge";
 constexpr char kActivatePath[] = "/ydp/v1/activate";
 constexpr char kRefreshPath[] = "/ydp/v1/credentials/refresh";
+constexpr char kProofPath[] = "/ydp/v1/identity/prove";
 
 std::string GenerateNonce() {
     uint8_t bytes[16];
@@ -29,14 +33,25 @@ std::string GenerateNonce() {
 
 std::string ComputeHardwareSignature(const std::string& plain) {
     uint8_t digest[32];
-    if (esp_hmac_calculate(HMAC_KEY0, plain.data(), plain.size(), digest) != ESP_OK) {
+    const int slot = SystemInfo::GetAuthKeySlot();
+    if (slot == -1) {
+        std::array<uint8_t, 32> key{};
+        if (!SystemInfo::GetFlashAuthKey(key)) return {};
+        const auto* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+        const int result = md ? mbedtls_md_hmac(md, key.data(), key.size(),
+                                                 reinterpret_cast<const uint8_t*>(plain.data()),
+                                                 plain.size(), digest) : -1;
+        mbedtls_platform_zeroize(key.data(), key.size());
+        if (result != 0) return {};
+    } else if (slot < 0 || slot > 5 ||
+               esp_hmac_calculate(static_cast<hmac_key_id_t>(slot), plain.data(), plain.size(), digest) != ESP_OK) {
         return {};
     }
     return ToLowerHex(digest, sizeof(digest));
 }
 
 std::string CanonicalDeviceId() {
-    std::string device_id = SystemInfo::GetMacAddress();
+    std::string device_id = SystemInfo::GetDeviceId();
     device_id.erase(std::remove(device_id.begin(), device_id.end(), ':'), device_id.end());
     return device_id;
 }
@@ -104,7 +119,7 @@ void YdpBootstrap::SetDeviceId(const std::string& device_id) {
 }
 
 void YdpBootstrap::SetAuthKey(const std::string&) {
-    // Device Auth v2 signs with hardware HMAC_KEY0. Plaintext factory keys are never imported.
+    // Device Auth v2 signs with the selected hardware HMAC key. Plaintext factory keys are never imported.
 }
 
 void YdpBootstrap::SetKeyVersion(int key_version) {
@@ -151,6 +166,10 @@ void YdpBootstrap::Bootstrap(const std::string& ydp_endpoint, BootstrapCallback 
 
 void YdpBootstrap::Activate(const std::string& ydp_endpoint, ActivateCallback callback) {
     Prove(ydp_endpoint, kPurposeActivate, kActivatePath, callback);
+}
+
+void YdpBootstrap::ProveFactory(const std::string& ydp_endpoint, ActivateCallback callback) {
+    Prove(ydp_endpoint, kPurposeProvision, kProofPath, callback);
 }
 
 void YdpBootstrap::Refresh(const std::string& ydp_endpoint, ActivateCallback callback) {
