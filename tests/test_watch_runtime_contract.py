@@ -78,8 +78,7 @@ def test_watch_page_is_not_preempted_by_automatic_conversation_updates():
     assert role_image.count("page() != YGSoulPage::kWatch") >= 2
     assert "page() == YGSoulPage::kWatch" in chat
     assert "lv_obj_move_foreground(launcher_panel_)" in chat
-    assert "const bool keep_watch = launcher_state_.page() == YGSoulPage::kWatch" in download
-    assert "ReleaseLauncherTransition(keep_watch);" in download
+    assert "ReleaseLauncherTransition(launcher_state_.page() != YGSoulPage::kDesktop);" in download
     assert "StopWatchClock();" not in download
 
 

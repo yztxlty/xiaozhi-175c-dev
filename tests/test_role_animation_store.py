@@ -32,7 +32,7 @@ def test_boot_rejects_incomplete_or_missing_role_animation_package():
 def test_role_animation_download_identifies_the_physical_device():
     source = (ROOT / "main/device_content/role_animation_store.cc").read_text()
     assert '#include "system_info.h"' in source
-    assert 'http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str())' in source
+    assert 'http->SetHeader("Device-Id", SystemInfo::GetDeviceId().c_str())' in source
     assert "http->SetTimeout(90000)" in source
 
 

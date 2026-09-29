@@ -93,7 +93,7 @@ void DeviceManagementClient::Run(void* arg) {
             auto websocket = network->CreateWebSocket(2);
             websocket->SetHeader("Authorization", ("Bearer " + client->token_).c_str());
             websocket->SetHeader("Protocol-Version", "1");
-            websocket->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+            websocket->SetHeader("Device-Id", SystemInfo::GetDeviceId().c_str());
             websocket->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
             websocket->OnData([client](const char* data, size_t len, bool binary) {
                 if (!binary && client->on_message_) {

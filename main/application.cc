@@ -403,6 +403,40 @@ void Application::ActivationTask() {
     // endpoints were already cached before the upgrade.
     ota_->MarkCurrentVersionValid();
     ota_->ConfirmPendingUpgrade();
+
+    if (SystemInfo::FactoryProofPending()) {
+        bool proven = false;
+        while (!proven) {
+            ygsoul::ydp::YdpBootstrap::GetInstance().ProveFactory(
+                CONFIG_YDP_ACTIVATION_BASE_URL,
+                [&](bool success, const ygsoul::ydp::ActivateCredentials&, const std::string& error) {
+                    proven = success;
+                    if (!success) ESP_LOGW(TAG, "Factory identity proof failed: %s", error.c_str());
+                });
+            if (!proven) vTaskDelay(pdMS_TO_TICKS(30000));
+        }
+        while (!SystemInfo::ClearFactoryProofPending()) {
+            ESP_LOGE(TAG, "Factory proof marker could not be cleared");
+            vTaskDelay(pdMS_TO_TICKS(30000));
+        }
+    }
+
+    // The pairing gate uses only the lightweight management channel. Do not
+    // initialize the voice protocol before the App receives this session receipt.
+    InitializeManagementClient();
+    while (management_client_ == nullptr || !management_client_->IsConnected()) {
+        if (management_client_ == nullptr) {
+            ESP_LOGW(TAG, "Management config unavailable, refresh in 1 second");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            if (ota_->CheckVersion() == ESP_OK) InitializeManagementClient();
+            continue;
+        }
+        management_client_->Start();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    while (!ReportPairingReceipt()) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
     Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::BALANCED);
 
     // YGSoul Device Auth v2: prove identity before opening either device channel.
@@ -440,22 +474,6 @@ void Application::ActivationTask() {
         }
     }
 
-    // The pairing gate uses only the lightweight management channel. Do not
-    // initialize the voice protocol before the App receives this session receipt.
-    InitializeManagementClient();
-    while (management_client_ == nullptr || !management_client_->IsConnected()) {
-        if (management_client_ == nullptr) {
-            ESP_LOGW(TAG, "Management config unavailable, refresh in 1 second");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            if (ota_->CheckVersion() == ESP_OK) InitializeManagementClient();
-            continue;
-        }
-        management_client_->Start();
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    while (!ReportPairingReceipt()) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
     InitializeProtocol();
 
     // Signal completion to main loop
@@ -884,6 +902,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
                 resource_id->valuestring, version->valueint, url->valuestring,
                 sha256->valuestring, static_cast<size_t>(bytes->valuedouble), resolved_format);
             RoleVisualStore::GetInstance().LoadActive();
+            RoleAnimationStore::GetInstance().Resume();
             if (restore_low_power) board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             if (!succeeded) error_code = "role_visual_prepare_failed";
         } else {
@@ -994,6 +1013,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         board.GetDisplay()->PrepareGalleryDownload();
         succeeded = GalleryStore::GetInstance().Apply(params);
+        RoleAnimationStore::GetInstance().Resume();
         board.GetDisplay()->RefreshGallery();
         if (restore_low_power) {
             board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
@@ -1006,6 +1026,7 @@ void Application::HandleCustomMessage(const cJSON* root) {
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         board.GetDisplay()->PrepareGalleryDownload();
         succeeded = WatchFaceStore::GetInstance().Apply(params);
+        RoleAnimationStore::GetInstance().Resume();
         board.GetDisplay()->RefreshWatchFace();
         if (restore_low_power) board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         command_changes_telemetry = succeeded;

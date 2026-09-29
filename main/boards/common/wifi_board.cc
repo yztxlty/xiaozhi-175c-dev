@@ -400,7 +400,7 @@ std::string WifiBoard::GetDeviceStatusJson() {
     auto& board = Board::GetInstance();
     auto root = cJSON_CreateObject();
 
-    auto vendor_sn = SystemInfo::GetMacAddress();
+    auto vendor_sn = SystemInfo::GetDeviceId();
     vendor_sn.erase(std::remove(vendor_sn.begin(), vendor_sn.end(), ':'), vendor_sn.end());
     cJSON_AddStringToObject(root, "vendorSn", vendor_sn.c_str());
     cJSON_AddStringToObject(root, "productKey", "ESP32S3");

@@ -13,7 +13,8 @@ class Esp32YdpChallengeContractTests(unittest.TestCase):
 
         self.assertIn('/ydp/v1/activation/challenge', source)
         self.assertIn('/ydp/v1/credentials/refresh', source)
-        self.assertIn('esp_hmac_calculate(HMAC_KEY0', source)
+        self.assertIn('esp_hmac_calculate(', source)
+        self.assertIn('SystemInfo::GetAuthKeySlot()', source)
         self.assertIn('YGSoul-Device-Auth-v2', helper)
         self.assertIn('"authVersion"', source)
         self.assertIn('"keyVersion"', source)

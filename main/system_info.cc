@@ -9,11 +9,39 @@
 #include <esp_app_desc.h>
 #include <esp_ota_ops.h>
 #include <esp_pm.h>
+#include <nvs.h>
+#include <nvs_flash.h>
+#include <algorithm>
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "esp_wifi_remote.h"
 #endif
 
 #define TAG "SystemInfo"
+
+namespace {
+constexpr char kFactoryPartition[] = "nvsfactory";
+
+bool OpenFactoryNvs(nvs_handle_t& handle) {
+    static const bool initialized = nvs_flash_init_partition(kFactoryPartition) == ESP_OK;
+    return initialized && nvs_open_from_partition(kFactoryPartition, "factory", NVS_READONLY, &handle) == ESP_OK;
+}
+
+std::string FactoryString(const char* key) {
+    nvs_handle_t handle = 0;
+    if (!OpenFactoryNvs(handle)) return {};
+    size_t size = 0;
+    if (nvs_get_str(handle, key, nullptr, &size) != ESP_OK || size == 0 || size > 65) {
+        nvs_close(handle);
+        return {};
+    }
+    std::string value(size, '\0');
+    const bool ok = nvs_get_str(handle, key, value.data(), &size) == ESP_OK;
+    nvs_close(handle);
+    if (!ok) return {};
+    if (!value.empty() && value.back() == '\0') value.pop_back();
+    return value;
+}
+}
 
 size_t SystemInfo::GetFlashSize() {
     uint32_t flash_size;
@@ -42,6 +70,64 @@ std::string SystemInfo::GetMacAddress() {
     char mac_str[18];
     snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return std::string(mac_str);
+}
+
+std::string SystemInfo::GetDeviceId() {
+    static const std::string device_id = [] {
+        const std::string value = FactoryString("device_id");
+        if (!value.empty() && value.size() <= 64 &&
+            std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                       (c >= 'a' && c <= 'z') || c == '_' || c == '.' || c == ':' || c == '-';
+            })) {
+            return value;
+        }
+        return GetMacAddress();
+    }();
+    return device_id;
+}
+
+int SystemInfo::GetAuthKeySlot() {
+    static const int slot = [] {
+        const std::string storage = FactoryString("key_storage");
+        if (storage == "flash") return -1;
+        if (!storage.empty() && storage != "hardware") return -2;
+        nvs_handle_t handle = 0;
+        if (!OpenFactoryNvs(handle)) return 0;
+        int32_t value = 0;
+        const esp_err_t result = nvs_get_i32(handle, "key_slot", &value);
+        nvs_close(handle);
+        return result == ESP_ERR_NVS_NOT_FOUND ? 0 :
+               result == ESP_OK && value >= 0 && value <= 5 ? static_cast<int>(value) : -2;
+    }();
+    return slot;
+}
+
+bool SystemInfo::GetFlashAuthKey(std::array<uint8_t, 32>& key) {
+    if (GetAuthKeySlot() != -1) return false;
+    nvs_handle_t handle = 0;
+    if (!OpenFactoryNvs(handle)) return false;
+    size_t size = key.size();
+    const esp_err_t result = nvs_get_blob(handle, "auth_key", key.data(), &size);
+    nvs_close(handle);
+    return result == ESP_OK && size == key.size();
+}
+
+bool SystemInfo::FactoryProofPending() {
+    nvs_handle_t handle = 0;
+    if (!OpenFactoryNvs(handle)) return false;
+    uint8_t pending = 0;
+    const bool result = nvs_get_u8(handle, "proof_pending", &pending) == ESP_OK && pending == 1;
+    nvs_close(handle);
+    return result;
+}
+
+bool SystemInfo::ClearFactoryProofPending() {
+    nvs_handle_t handle = 0;
+    if (nvs_open_from_partition(kFactoryPartition, "factory", NVS_READWRITE, &handle) != ESP_OK) return false;
+    const bool result = nvs_set_u8(handle, "proof_pending", 0) == ESP_OK && nvs_commit(handle) == ESP_OK;
+    nvs_close(handle);
+    return result;
 }
 
 std::string SystemInfo::GetChipModelName() {

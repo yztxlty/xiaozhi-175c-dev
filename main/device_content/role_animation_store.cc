@@ -50,7 +50,7 @@ bool Download(const std::string& url, const std::string& path, const std::string
         return false;
     auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
     http->SetTimeout(90000);
-    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+    http->SetHeader("Device-Id", SystemInfo::GetDeviceId().c_str());
     if (!http->Open("GET", url) || http->GetStatusCode() != 200 ||
         http->GetBodyLength() != expected_bytes) {
         ESP_LOGE(TAG, "Animation download rejected: status=%d body=%u expected=%u",

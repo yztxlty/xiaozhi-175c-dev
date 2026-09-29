@@ -354,8 +354,8 @@ void YgSoulBleProvisioning::HandleFrame(uint8_t command, const std::string& payl
             netcfg_started = netcfg_started_;
         }
         cJSON* json = cJSON_CreateObject();
-        const auto mac = SystemInfo::GetMacAddress();
-        cJSON_AddStringToObject(json, "vendorSn", mac.c_str());
+        const auto device_id = SystemInfo::GetDeviceId();
+        cJSON_AddStringToObject(json, "vendorSn", device_id.c_str());
         cJSON_AddStringToObject(json, "productKey", kProductKey);
         cJSON_AddStringToObject(json, "modelCode", kProductKey);
         cJSON_AddStringToObject(json, "name", "YGSoul ESP32S3");

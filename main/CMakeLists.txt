@@ -933,6 +933,7 @@ idf_component_register(SRCS ${SOURCES}
                         spi_flash
                         console
                         efuse
+                        mbedtls
                         bt
                         fatfs
                     )

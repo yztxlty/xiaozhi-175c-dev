@@ -127,7 +127,7 @@ def test_firmware_sends_v2_fields_and_keeps_hardware_hmac():
         '/ydp/v1/activation/challenge',
         '/ydp/v1/activate',
         '/ydp/v1/credentials/refresh',
-        'esp_hmac_calculate(HMAC_KEY0',
+        'esp_hmac_calculate(',
         'BuildDeviceAuthSigningMessage',
     ):
         assert token in source or token in helper, token
@@ -137,8 +137,8 @@ def test_firmware_sends_v2_fields_and_keeps_hardware_hmac():
     assert 'YdpBootstrap::GetInstance().Refresh' in client
     assert 'SetKeyVersion' in client
     assert 'SetTransport' in client
-    assert 'esp_hmac_calculate(HMAC_KEY0' in source
-    assert 'HMAC_KEY0' in source
+    assert 'SystemInfo::GetAuthKeySlot()' in source
+    assert 'nvs_get_i32(handle, "key_slot"' in (ROOT / 'main/system_info.cc').read_text()
 
 
 def test_auth_paths_never_log_keys_signatures_or_bodies():

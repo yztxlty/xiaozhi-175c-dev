@@ -264,14 +264,13 @@ def test_role_visual_download_releases_gallery_decoder_and_supports_eaf():
     assert 'SetDeviceState' not in store
 
 
-def test_resource_download_releases_non_watch_visuals_without_preempting_watch():
+def test_resource_download_keeps_current_visuals_until_commit():
     board = (ROOT / 'main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc').read_text()
     release = board[board.index('void PrepareGalleryDownload() override'):]
     release = release[:release.index('void RefreshGallery() override')]
-    assert 'StopGalleryAnimation();' in release
-    assert 'StopRoleAnimation();' in release
-    assert 'const bool keep_watch = launcher_state_.page() == YGSoulPage::kWatch;' in release
-    assert 'ReleaseLauncherTransition(keep_watch);' in release
+    assert 'StopGalleryAnimation();' not in release
+    assert 'StopRoleAnimation();' not in release
+    assert 'ReleaseLauncherTransition(launcher_state_.page() != YGSoulPage::kDesktop);' in release
     assert 'StopWatchClock();' not in release
     assert 'launcher_state_.page() == YGSoulPage::kGallery' not in release
 
@@ -279,6 +278,18 @@ def test_resource_download_releases_non_watch_visuals_without_preempting_watch()
     handler = application[application.index('strcmp(command->valuestring, "prepareRoleVisual")'):]
     handler = handler[:handler.index('strcmp(command->valuestring, "commitActiveRole")')]
     assert 'RoleVisualStore::GetInstance().LoadActive();' in handler
+
+
+def test_media_download_restores_the_active_role_after_releasing_animation_memory():
+    application = (ROOT / 'main/application.cc').read_text()
+    for command, end_marker in (
+        ('prepareRoleVisual', 'applyRoleAnimations'),
+        ('applyGallery', 'applyWatchFace'),
+        ('applyWatchFace', 'deleteGalleryItem'),
+    ):
+        handler = application[application.index(f'"{command}"'):]
+        handler = handler[:handler.index(f'"{end_marker}"')]
+        assert 'RoleAnimationStore::GetInstance().Resume();' in handler
 
 
 def test_opening_code_is_persisted_before_ready_without_audio_changes():
